@@ -2,15 +2,14 @@
 "use strict";
 
 /**
- * omnitermux — CLI chat modern lewat OmniRoute (Combo ALL-FREE).
- * Tool Calling (OpenAI Function Calling) + Workspace sandbox.
+ * omnitermux — CLI chat modern dengan Tool Calling + Multi-Provider support.
  * Hanya modul bawaan Node.js, tanpa dependensi eksternal.
  */
 
 const readline = require("node:readline");
 const { stdin, stdout } = require("node:process");
 const { daftarTools, eksekusiTool } = require("./tools.js");
-const { bacaConfig, jalankanSetup, CONFIG_FILE } = require("./setup.js");
+const { bacaConfig, jalankanSetup, CONFIG_FILE, DIRECT_PROVIDERS } = require("./setup.js");
 
 /* ------------------------------------------------------------ konfigurasi */
 
@@ -19,6 +18,7 @@ const { bacaConfig, jalankanSetup, CONFIG_FILE } = require("./setup.js");
 let BASE_URL = "";
 let MODEL = "";
 let API_KEY = "";
+let PROVIDER_KEY = "";
 const TIMEOUT_MS = 120_000;
 
 // metadata combo mendeklarasikan context 4096, jadi riwayat sengaja dibatasi
@@ -29,10 +29,12 @@ const LEBAR_MAKS = 70;
 const LEBAR_MIN = 40;
 
 // versi aplikasi
-const VERSI = "0.4.0";
+const VERSI = "0.5.0";
 
 /* ------------------------------------------------------------------ warna */
 
+// Warna hanya dipakai saat output benar-benar terminal. Saat output dipipa
+// (mis. ke file) semua kode ANSI dimatikan supaya teksnya bersih.
 const PAKAI_WARNA = Boolean(stdout.isTTY) && !process.env.NO_COLOR;
 const esc = (kode) => (PAKAI_WARNA ? `\x1b[${kode}m` : "");
 
@@ -472,6 +474,317 @@ async function kirimPesanDenganTool(riwayat, rl, lebar) {
   }
 }
 
+/* ------------------------------------------------------------ Model Management */
+
+const SAFE_FALLBACK_MODEL = "meta/llama-3.1-70b-instruct";
+
+async function ambilDaftarModelDariAPI(providerKey, apiKey, baseUrl) {
+  const provider = DIRECT_PROVIDERS[providerKey];
+  if (!provider?.modelsEndpoint) {
+    throw new Error(`Provider tidak mendukung daftar model otomatis`);
+  }
+
+  const url = `${provider.baseUrl}/${provider.modelsEndpoint}`;
+  let headers = { "Accept": "application/json" };
+
+  if (provider.authType === "bearer") {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    
+    const urlWithKey = provider.authType === "query_key" 
+      ? `${provider.baseUrl}/${provider.modelsEndpoint}?key=${encodeURIComponent(apiKey)}`
+      : `${provider.baseUrl}/${provider.modelsEndpoint}`;
+
+    const response = await fetch(urlWithKey, {
+      headers,
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const data = await response.json();
+    
+    let models = [];
+    if (providerKey === "google") {
+      models = data.models?.map(m => m.name.replace("models/", "")) || [];
+    } else if (providerKey === "openrouter") {
+      models = data.data?.map(m => m.id) || [];
+    } else {
+      models = data.data?.map(m => m.id) || [];
+    }
+
+    const chatModels = models.filter(m => 
+      !m.includes("embedding") && 
+      !m.includes("moderation") &&
+      !m.includes("whisper") &&
+      !m.includes("tts") &&
+      !m.includes("dall-e")
+    );
+
+    return chatModels.length > 0 ? chatModels : models;
+  } catch (err) {
+    throw new Error(`Gagal mengambil daftar model: ${err.message}`);
+  }
+}
+
+async function pilihModelInteraktif(providerKey, apiKey, defaultModel) {
+  const provider = DIRECT_PROVIDERS[providerKey];
+  console.log(`\nMengambil daftar model dari ${provider.nama}...`);
+  
+  try {
+    const models = await ambilDaftarModelDariAPI(providerKey, apiKey, BASE_URL);
+    
+    if (models.length === 0) {
+      console.log("  Tidak ada model yang ditemukan, gunakan default.");
+      return defaultModel;
+    }
+
+    const tampilkan = models.slice(0, 20);
+    console.log("\nModel tersedia:");
+    tampilkan.forEach((m, i) => {
+      const mark = m === MODEL ? " " + cat("(aktif)", C.hijau) : "";
+      console.log(`  ${cat(String(i + 1).padStart(2), C.kuning)}. ${m}${mark}`);
+    });
+    if (models.length > 20) {
+      console.log(cat(`  ... dan ${models.length - 20} model lainnya`, C.abu));
+    }
+
+    while (true) {
+      const input = await tanyaRL(`\nPilih model (nomor 1-${tampilkan.length}, atau ketik nama model)`, "");
+      
+      if (input === "") {
+        console.log(cat(`  Melewatkan perubahan. Model tetap: ${MODEL}`, C.abu));
+        return MODEL;
+      }
+      
+      const num = parseInt(input, 10);
+      if (!isNaN(num) && num >= 1 && num <= tampilkan.length) {
+        return tampilkan[num - 1];
+      }
+      
+      if (input && models.includes(input)) {
+        return input;
+      }
+      
+      if (input) {
+        const confirm = await tanyaYesNoRL(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false);
+        if (confirm) return input;
+      }
+      
+      console.log("  Input tidak valid. Coba lagi.");
+    }
+  } catch (err) {
+    console.log(`  ⚠️  ${err.message}`);
+    console.log("  Fallback ke input manual.");
+    return await tanyaRL(`Model default`, MODEL);
+  }
+}
+
+/* ------------------------------------------------------------ Slash Commands */
+
+async function handleModelCommand(rl, lebar) {
+  if (!PROVIDER_KEY || !DIRECT_PROVIDERS[PROVIDER_KEY]?.modelsEndpoint) {
+    console.log(cat("  ⚠️  Perintah /model hanya tersedia untuk Direct Provider (bukan Gateway).", C.kuning));
+    return;
+  }
+
+  const provider = DIRECT_PROVIDERS[PROVIDER_KEY];
+  console.log(cat(`\n🔄 Mengambil daftar model dari ${provider.nama}...`, C.sian));
+  
+  try {
+    const models = await ambilDaftarModelDariAPI(PROVIDER_KEY, API_KEY, BASE_URL);
+    
+    if (models.length === 0) {
+      console.log(cat("  Tidak ada model yang ditemukan.", C.kuning));
+      return;
+    }
+
+    const tampilkan = models.slice(0, 20);
+    console.log(cat("\n📋 Model tersedia:", C.putih, C.tebal));
+    models.slice(0, 20).forEach((m, i) => {
+      const mark = m === MODEL ? " " + cat("(aktif)", C.hijau) : "";
+      console.log(`  ${cat(String(i + 1).padStart(2), C.kuning)}. ${m}${mark}`);
+    });
+    if (models.length > 20) {
+      console.log(cat(`  ... dan ${models.length - 20} model lainnya`, C.abu));
+    }
+
+    const input = await tanyaRL(`\nPilih model (nomor 1-${Math.min(20, models.length)}, atau ketik nama model)`, "");
+    
+    if (input === "") {
+      console.log(cat(`  Melewatkan perubahan. Model tetap: ${MODEL}`, C.abu));
+      return;
+    }
+    
+    const num = parseInt(input, 10);
+    let modelBaru;
+    if (!isNaN(num) && num >= 1 && num <= Math.min(20, models.length)) {
+      modelBaru = models[num - 1];
+    } else if (input && models.includes(input)) {
+      modelBaru = input;
+    } else if (input) {
+      const confirm = await tanyaYesNoRL(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false);
+      if (confirm) modelBaru = input;
+    }
+    
+    if (modelBaru && modelBaru !== MODEL) {
+      // Update config file
+      const config = await bacaConfig();
+      if (config) {
+        config.model = modelBaru;
+        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+      }
+      MODEL = modelBaru;
+      SESI.modelAktif = MODEL;
+      console.log(cat(`\n✅ Model berhasil diubah menjadi: ${modelBaru}`, C.hijau, C.tebal));
+    }
+  } catch (err) {
+    console.log(cat(`\n❌ Gagal mengambil daftar model: ${err.message}`, C.merah));
+  }
+}
+
+async function handleConfigCommand(rl, lebar) {
+  const config = await bacaConfig();
+  if (!config) {
+    console.log(cat("  ⚠️  Konfigurasi tidak ditemukan.", C.kuning));
+    return;
+  }
+
+  console.log();
+  console.log(cat("┌─ Konfigurasi Saat Ini " + "─".repeat(Math.max(0, lebar - 23)) + "┐", C.abu));
+  
+  const providerInfo = config.tipe === "direct" && DIRECT_PROVIDERS[config.provider] 
+    ? DIRECT_PROVIDERS[config.provider].nama 
+    : config.tipe === "gateway" ? "Gateway/Proxy" : "Unknown";
+  
+  const apiKeyDisplay = config.apiKey 
+    ? config.apiKey.slice(0, 6) + "..." + config.apiKey.slice(-4) 
+    : "(kosong)";
+
+  const rows = [
+    ["Provider", providerInfo],
+    ["Base URL", config.baseUrl],
+    ["Model", config.model],
+    ["API Key", apiKeyDisplay],
+  ];
+
+  rows.forEach(([label, value]) => {
+    console.log(cat("│ ", C.abu) + cat(label.padEnd(12), C.abu) + cat("│ ", C.abu) + cat(value, C.putih) + " ".repeat(Math.max(1, lebar - 16 - lebarTeks(label) - lebarTeks(value))) + cat("│", C.abu));
+  });
+  console.log(cat("└" + "─".repeat(Math.max(0, lebar - 2)) + "┘", C.abu));
+  console.log();
+
+  const action = await tanyaRL(`Ketik 'edit' untuk mengubah konfigurasi (menjalankan setup ulang), atau tekan Enter untuk kembali: `, "");
+  
+  if (action.trim().toLowerCase() === "edit") {
+    console.log();
+    const config = await jalankanSetup();
+    if (config) {
+      BASE_URL = (config.baseUrl || "http://localhost:20128/v1").replace(/\/+$/, "");
+      MODEL = config.model || "ALL-FREE";
+      API_KEY = config.apiKey || "";
+      PROVIDER_KEY = config.provider || "";
+      SESI.modelAktif = MODEL;
+      console.log(cat("\n✅ Konfigurasi diperbarui. Model aktif: " + MODEL, C.hijau));
+    }
+  }
+}
+
+function handleToolsCommand(lebar) {
+  const tools = [
+    ["read_file", "Membaca isi file di workspace", 'read_file({ "path": "file.txt" })'],
+    ["write_file", "Menulis/membuat file di workspace", 'write_file({ "path": "file.txt", "content": "isi" })'],
+    ["run_command", "Menjalankan perintah shell (timeout 10s)", 'run_command({ "command": "ls -la" })'],
+  ];
+
+  console.log();
+  console.log(bingkaiAtas("AI Skills (Tools)", lebar));
+  rows.forEach((row) => {
+    const [name, desc, example] = row;
+    console.log(cat("│ ", C.abu) + cat(name.padEnd(12), C.putih, C.tebal) + cat("│ ", C.abu) + cat(desc, C.putih) + " ".repeat(Math.max(1, lebar - 16 - lebarTeks(name) - lebarTeks(desc))) + cat("│", C.abu));
+    console.log(cat("│ ", C.abu) + " ".repeat(14) + cat("Contoh: ", C.abu) + cat(example, C.sian) + " ".repeat(Math.max(1, lebar - 16 - lebarTeks(example))) + cat("│", C.abu));
+  });
+  console.log(bingkaiBawah(lebar));
+  console.log();
+}
+
+function handleClearCommand() {
+  // ANSI escape code untuk clear screen
+  process.stdout.write("\x1b[2J\x1b[0f");
+}
+
+async function handleHelpCommand(lebar) {
+  const categories = {
+    "Chat & Session": [
+      ["/help", "Tampilkan bantuan ini"],
+      ["/stats", "Tampilkan statistik sesi (token, biaya, durasi)"],
+      ["/compact", "Minta AI merangkum percakapan untuk hemat konteks"],
+      ["/reset", "Kosongkan riwayat percakapan"],
+      ["/clear", "Bersihkan layar terminal"],
+      ["exit", "Keluar (juga: quit, /exit, atau Ctrl+C)"],
+    ],
+    "Konfigurasi & Alat": [
+      ["/model", "Pilih model AI interaktif (Direct Provider)"],
+      ["/config", "Lihat & ubah konfigurasi (provider, model, API key)"],
+      ["/tools", "Lihat daftar AI Skills (tools) yang tersedia"],
+      ["/help", "Tampilkan bantuan ini"],
+    ],
+  };
+
+  console.log();
+  console.log(bingkaiAtas("Bantuan — Perintah Tersedia", lebar));
+
+  for (const [category, commands] of Object.entries(categories)) {
+    console.log(cat("│ " + category, C.putih, C.tebal) + " ".repeat(Math.max(1, lebar - 2 - lebarTeks(category))) + cat("│", C.abu));
+    commands.forEach(([cmd, desc]) => {
+      console.log(cat("│   ", C.abu) + cat(cmd.padEnd(10), C.kuning) + cat("— ", C.abu) + cat(desc, C.putih) + " ".repeat(Math.max(1, lebar - 14 - lebarTeks(cmd) - lebarTeks(desc))) + cat("│", C.abu));
+    });
+    console.log(cat("├" + "─".repeat(Math.max(0, lebar - 2)) + "┤", C.abu));
+  }
+  console.log(cat("└" + "─".repeat(Math.max(0, lebar - 2)) + "┘", C.abu));
+  console.log();
+}
+
+function handleModelNotFoundError(modelName) {
+  console.log(cat(`\n❌ Model '${modelName}' tidak ditemukan di server.`, C.merah));
+  console.log(cat("   Ketik /model untuk memilih model lain yang tersedia.", C.kuning));
+}
+
+/* ------------------------------------------------------------ Readline helpers untuk slash commands */
+
+function tanyaRL(pertanyaan, defaultVal = "") {
+  return new Promise((resolve) => {
+    if (!stdout.isTTY) { resolve(defaultVal); return; }
+    const rl = readline.createInterface({ input: stdin, output: stdout, terminal: true });
+    const prompt = defaultVal ? `${pertanyaan} [${defaultVal}]: ` : `${pertanyaan}: `;
+    rl.question(prompt, (input) => {
+      rl.close();
+      resolve(input.trim() || defaultVal);
+    });
+  });
+}
+
+function tanyaYesNoRL(pertanyaan, defaultYes = true) {
+  return new Promise((resolve) => {
+    if (!stdout.isTTY) { resolve(defaultYes); return; }
+    const rl = readline.createInterface({ input: stdin, output: stdout, terminal: true });
+    const hint = defaultYes ? "Y/n" : "y/N";
+    rl.question(`${pertanyaan} [${hint}]: `, (jawab) => {
+      rl.close();
+      resolve(jawab.trim().toLowerCase() === "y" || jawab.trim().toLowerCase() === "yes");
+    });
+  });
+}
+
 /* ------------------------------------------------------------ token & status */
 
 function hitungTokenPerkiraan(teks) { return Math.ceil(String(teks).length / 3.5); }
@@ -480,8 +793,8 @@ function formatDurasi(ms) { const d = Math.floor(ms/1000); const m=Math.floor(d/
 function hitungBiayaPerkiraan(t) { return "$0.00"; }
 
 function cetakStatusBar(lebar) {
-  const s = Date.now();
-  const durasi = formatDurasi(s - SESI.mulai);
+  const sekarang = Date.now();
+  const durasi = formatDurasi(sekarang - SESI.mulai);
   const model = SESI.modelAktif;
   const token = SESI.tokenTotal;
   const biaya = hitungBiayaPerkiraan(token);
@@ -510,20 +823,6 @@ function cetakBanner(lebar) {
   console.log("  " + cat("│", C.sian) + "  " + cat("/reset", C.kuning) + " " + cat("— kosongkan riwayat", C.abu) + " ".repeat(lebar - 26) + cat("│", C.sian));
   console.log("  " + cat("│", C.sian) + "  " + cat("exit", C.kuning) + " " + cat("— keluar", C.abu) + " ".repeat(lebar - 16) + cat("│", C.sian));
   console.log("  " + cat("╰" + garis + "╯", C.sian));
-  console.log();
-}
-
-function cetakBantuan(lebar) {
-  const perintah = [
-    ["/help", "tampilkan bantuan ini"],
-    ["/stats", "tampilkan statistik sesi (token, biaya, durasi)"],
-    ["/compact", "minta AI merangkum percakapan untuk hemat konteks"],
-    ["/reset", "kosongkan riwayat percakapan"],
-    ["/model", "tampilkan model & endpoint yang dipakai"],
-    ["exit", "keluar (juga: quit, /exit, atau Ctrl+C)"],
-  ];
-  for (const [p, a] of perintah) console.log("  " + cat(p.padEnd(8), C.kuning) + cat(a, C.abu));
-  console.log("  " + cat("Lebar tampilan", C.abu) + ": " + cat(`${lebar} kolom`, C.putih));
   console.log();
 }
 
@@ -600,13 +899,16 @@ function pesanJaringan(err, url) {
 function pesanHTTP(status, detail) {
   const ekor = detail ? `\nDetail dari server: ${detail}` : "";
   if (status === 401 || status === 403) return `API key ditolak (HTTP ${status}). Periksa variabel OMNIROUTE_API_KEY.${ekor}`;
-  if (status === 404) return `Model "${MODEL}" tidak ditemukan di OmniRoute (HTTP 404).${ekor}`;
+  if (status === 404) return `Model "${MODEL}" tidak ditemukan di server (HTTP 404).${ekor}`;
   if (status === 429) return `Kena rate limit (HTTP 429). Tunggu sebentar lalu coba lagi.${ekor}`;
-  if (status >= 500) return `Server OmniRoute bermasalah (HTTP ${status}).${ekor}`;
+  if (status >= 500) return `Server bermasalah (HTTP ${status}).${ekor}`;
   return `Permintaan ditolak (HTTP ${status}).${ekor}`;
 }
 
 /* ------------------------------------------------------------ main */
+
+const fs = require("node:fs/promises");
+const path = require("node:path");
 
 async function main() {
   // 1. Muat konfigurasi
@@ -621,6 +923,7 @@ async function main() {
   BASE_URL = (config.baseUrl || "http://localhost:20128/v1").replace(/\/+$/, "");
   MODEL = config.model || "ALL-FREE";
   API_KEY = config.apiKey || "";
+  PROVIDER_KEY = config.provider || "";
 
   if (!API_KEY) {
     console.error(cat("✖  API Key tidak ditemukan di konfigurasi.", C.merah));
@@ -678,9 +981,13 @@ async function main() {
     if (teks === "exit" || teks === "quit" || teks === "/exit") { keluar = true; rl.close(); break; }
     if (teks === "") { tanya(); continue; }
 
-    if (teks === "/help") { console.log(); cetakBantuan(lebar); tanya(); continue; }
+    // Slash commands
+    if (teks === "/help") { console.log(); await handleHelpCommand(lebar); tanya(); continue; }
     if (teks === "/stats") { console.log(); cetakStatistik(lebar); tanya(); continue; }
-    if (teks === "/model") { console.log(); console.log("  " + cat(MODEL, C.putih) + cat(" @ ", C.abu) + cat(BASE_URL, C.putih)); console.log(); tanya(); continue; }
+    if (teks === "/model") { console.log(); await handleModelCommand(rl, lebar); tanya(); continue; }
+    if (teks === "/config") { console.log(); await handleConfigCommand(rl, lebar); tanya(); continue; }
+    if (teks === "/tools") { console.log(); handleToolsCommand(lebar); tanya(); continue; }
+    if (teks === "/clear") { handleClearCommand(); tanya(); continue; }
     if (teks === "/reset") { riwayat.length = 0; SESI.tokenTotal = 0; SESI.pesanDikirim = 0; SESI.pesanDiterima = 0; console.log("  " + cat("Riwayat percakapan dikosongkan.", C.abu)); console.log(); tanya(); continue; }
     if (teks === "/compact") {
       console.log();
@@ -715,7 +1022,12 @@ async function main() {
       hasil = await kirimPesanDenganTool(riwayat, rl, lebar);
     } catch (err) {
       spinner.berhenti();
-      cetakGalat("Gagal", err.message, lebar);
+      // Handle 404 model not found
+      if (err.message.includes("404") && err.message.includes("Model")) {
+        handleModelNotFoundError(MODEL);
+      } else {
+        cetakGalat("Gagal", err.message, lebar);
+      }
       riwayat.pop();
       SESI.pesanDikirim -= 1;
       SESI.tokenTotal -= hitungTokenPerkiraan(teks);
@@ -736,26 +1048,6 @@ async function main() {
   console.log();
   console.log("  " + cat("Sampai jumpa.", C.sian));
   console.log();
-}
-
-/* ------------------------------------------------------------ util & export */
-
-function potongRiwayat(r) { while (r.length > MAKS_PESAN) r.shift(); }
-function gagal(p) { throw new Error(p); }
-function pesanJaringan(err, url) {
-  if (err && err.name === "TimeoutError") return `Server tidak merespons dalam ${TIMEOUT_MS / 1000} detik (${url}).`;
-  const kode = err && err.cause && err.cause.code;
-  if (kode === "ECONNREFUSED") return `Tidak bisa terhubung ke ${url}.\nServer OmniRoute sepertinya mati. Coba jalankan: omnirouter start`;
-  if (kode === "ENOTFOUND" || kode === "EAI_AGAIN") return `Alamat ${url} tidak bisa dijangkau (DNS gagal).`;
-  return `Gagal menghubungi ${url}: ${(err && err.message) || String(err)}`;
-}
-function pesanHTTP(status, detail) {
-  const ekor = detail ? `\nDetail dari server: ${detail}` : "";
-  if (status === 401 || status === 403) return `API key ditolak (HTTP ${status}). Periksa variabel OMNIROUTE_API_KEY.${ekor}`;
-  if (status === 404) return `Model "${MODEL}" tidak ditemukan di OmniRoute (HTTP 404).${ekor}`;
-  if (status === 429) return `Kena rate limit (HTTP 429). Tunggu sebentar lalu coba lagi.${ekor}`;
-  if (status >= 500) return `Server OmniRoute bermasalah (HTTP ${status}).${ekor}`;
-  return `Permintaan ditolak (HTTP ${status}).${ekor}`;
 }
 
 if (require.main === module) {

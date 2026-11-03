@@ -16,6 +16,8 @@ const DIRECT_PROVIDERS = {
   openai: { nama: "OpenAI", baseUrl: "https://api.openai.com/v1", modelDefault: "gpt-4o-mini", modelsEndpoint: "models", authType: "bearer" },
 };
 
+const SAFE_FALLBACK_MODEL = "meta/llama-3.1-70b-instruct";
+
 async function ambilDaftarModel(providerKey, apiKey) {
   const provider = DIRECT_PROVIDERS[providerKey];
   if (!provider.modelsEndpoint) throw new Error(`Provider ${provider.nama} tidak mendukung daftar model otomatis`);
@@ -43,17 +45,36 @@ async function pilihModel(providerKey, apiKey, defaultModel) {
   console.log(`\nMengambil daftar model dari ${DIRECT_PROVIDERS[providerKey].nama}...`);
   try {
     const models = await ambilDaftarModel(providerKey, apiKey);
-    if (models.length === 0) { console.log("  Tidak ada model yang ditemukan, gunakan default."); return defaultModel; }
+    
+    if (models.length === 0) {
+      console.log("  Tidak ada model yang ditemukan, gunakan default.");
+      return defaultModel;
+    }
+
     const tampilkan = models.slice(0, 20);
     console.log("\nModel tersedia:");
-    tampilkan.forEach((m, i) => { const mark = m === defaultModel ? " (default)" : ""; console.log(`  ${i + 1}. ${m}${mark}`); });
+    tampilkan.forEach((m, i) => {
+      const mark = m === defaultModel ? " (default)" : "";
+      console.log(`  ${i + 1}. ${m}${mark}`);
+    });
     if (models.length > 20) console.log(`  ... dan ${models.length - 20} model lainnya`);
+
     while (true) {
-      const input = await tanya(`\nPilih model (nomor 1-${tampilkan.length}, atau ketik nama model)`, "1");
+      const input = await tanya(`\nPilih model (nomor 1-${tampilkan.length}, atau ketik nama model, atau Enter untuk [${SAFE_FALLBACK_MODEL}])`, "");
+      
+      // Jika user menekan Enter tanpa input
+      if (input === "") {
+        console.log(`  Menggunakan model aman: ${SAFE_FALLBACK_MODEL}`);
+        return SAFE_FALLBACK_MODEL;
+      }
+      
       const num = parseInt(input, 10);
       if (!isNaN(num) && num >= 1 && num <= tampilkan.length) return tampilkan[num - 1];
+      
       if (input && models.includes(input)) return input;
+      
       if (input) { const confirm = await tanyaYesNo(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false); if (confirm) return input; }
+      
       console.log("  Input tidak valid. Coba lagi.");
     }
   } catch (err) { console.log(`  ⚠️  ${err.message}`); console.log("  Fallback ke input manual."); return await tanya(`Model default`, defaultModel); }
@@ -62,6 +83,7 @@ async function pilihModel(providerKey, apiKey, defaultModel) {
 function tanya(pertanyaan, defaultVal = "") {
   return new Promise((resolve) => { const prompt = defaultVal ? `${pertanyaan} [${defaultVal}]: ` : `${pertanyaan}: `; stdout.write(prompt); stdin.once("data", (data) => { const input = data.toString().trim(); resolve(input || defaultVal); }); });
 }
+
 function tanyaYesNo(pertanyaan, defaultYes = true) {
   return new Promise((resolve) => { const hint = defaultYes ? "Y/n" : "y/N"; stdout.write(`${pertanyaan} [${hint}]: `); stdin.once("data", (data) => { const input = data.toString().trim().toLowerCase(); if (!input) resolve(defaultYes); else resolve(input === "y" || input === "yes"); }); });
 }
@@ -113,46 +135,12 @@ async function jalankanSetup() {
 function tanya(pertanyaan, defaultVal = "") {
   return new Promise((resolve) => { const prompt = defaultVal ? `${pertanyaan} [${defaultVal}]: ` : `${pertanyaan}: `; stdout.write(prompt); stdin.once("data", (data) => { const input = data.toString().trim(); resolve(input || defaultVal); }); });
 }
+
 function tanyaYesNo(pertanyaan, defaultYes = true) { return new Promise((resolve) => { const hint = defaultYes ? "Y/n" : "y/N"; stdout.write(`${pertanyaan} [${hint}]: `); stdin.once("data", (data) => { const input = data.toString().trim().toLowerCase(); if (!input) resolve(defaultYes); else resolve(input === "y" || input === "yes"); }); }); }
-
-async function pilihModel(providerKey, apiKey, defaultModel) {
-  console.log(`\nMengambil daftar model dari ${DIRECT_PROVIDERS[providerKey].nama}...`);
-  try { const models = await ambilDaftarModel(providerKey, apiKey);
-    if (models.length === 0) { console.log("  Tidak ada model yang ditemukan, gunakan default."); return defaultModel; }
-    const tampilkan = models.slice(0, 20);
-    console.log("\nModel tersedia:");
-    tampilkan.forEach((m, i) => { const mark = m === defaultModel ? " (default)" : ""; console.log(`  ${i + 1}. ${m}${mark}`); });
-    if (models.length > 20) console.log(`  ... dan ${models.length - 20} model lainnya`);
-    while (true) { const input = await tanya(`\nPilih model (nomor 1-${tampilkan.length}, atau ketik nama model)`, "1"); const num = parseInt(input, 10);
-      if (!isNaN(num) && num >= 1 && num <= tampilkan.length) return tampilkan[num - 1];
-      if (input && models.includes(input)) return input;
-      if (input) { const confirm = await tanyaYesNo(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false); if (confirm) return input; }
-      console.log("  Input tidak valid. Coba lagi.");
-    }
-  } catch (err) { console.log(`  ⚠️  ${err.message}`); console.log("  Fallback ke input manual."); return await tanya(`Model default`, defaultModel); }
-}
-
-async function ambilDaftarModel(providerKey, apiKey) {
-  const provider = DIRECT_PROVIDERS[providerKey];
-  if (!provider.modelsEndpoint) throw new Error(`Provider ${provider.nama} tidak mendukung daftar model otomatis`);
-  const url = `${provider.baseUrl}/${provider.modelsEndpoint}`; let headers = { "Accept": "application/json" };
-  if (provider.authType === "bearer") headers["Authorization"] = `Bearer ${apiKey}`;
-  try { const controller = new AbortController(); const timeoutId = setTimeout(() => controller.abort(), 15000);
-    const urlWithKey = provider.authType === "query_key" ? `${provider.baseUrl}/${provider.modelsEndpoint}?key=${encodeURIComponent(apiKey)}` : `${provider.baseUrl}/${provider.modelsEndpoint}`;
-    const response = await fetch(urlWithKey, { headers, signal: controller.signal }); clearTimeout(timeoutId);
-    if (!response.ok) { const errText = await response.text(); throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`); }
-    const data = await response.json(); let models = [];
-    if (providerKey === "google") models = data.models?.map(m => m.name.replace("models/", "")) || [];
-    else if (providerKey === "openrouter") models = data.data?.map(m => m.id) || [];
-    else models = data.data?.map(m => m.id) || [];
-    const chatModels = models.filter(m => !m.includes("embedding") && !m.includes("moderation") && !m.includes("whisper") && !m.includes("tts") && !m.includes("dall-e"));
-    return chatModels.length > 0 ? chatModels : models;
-  } catch (err) { throw new Error(`Gagal mengambil daftar model: ${err.message}`); }
-}
-
-function tanya(pertanyaan, defaultVal = "") { return new Promise((resolve) => { const prompt = defaultVal ? `${pertanyaan} [${defaultVal}]: ` : `${pertanyaan}: `; stdout.write(prompt); stdin.once("data", (data) => { const input = data.toString().trim(); resolve(input || defaultVal); }); }); }
-function tanyaYesNo(pertanyaan, defaultYes = true) { return new Promise((resolve) => { const hint = defaultYes ? "Y/n" : "y/N"; stdout.write(`${pertanyaan} [${hint}]: `); stdin.once("data", (data) => { const input = data.toString().trim().toLowerCase(); if (!input) resolve(defaultYes); else resolve(input === "y" || input === "yes"); }); }); }
-
-async function bacaConfig() { try { const data = await fs.readFile(CONFIG_FILE, "utf-8"); return JSON.parse(data); } catch (err) { if (err.code === "ENOENT") return null; throw err; } }
 
 module.exports = { jalankanSetup, bacaConfig, CONFIG_FILE, CONFIG_DIR, DIRECT_PROVIDERS };
+
+async function bacaConfig() {
+  try { const data = await fs.readFile(CONFIG_FILE, "utf-8"); return JSON.parse(data); }
+  catch (err) { if (err.code === "ENOENT") return null; throw err; }
+}
