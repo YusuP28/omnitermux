@@ -305,6 +305,10 @@ function hitungTokenPerkiraan(teks) {
   return Math.ceil(String(teks).length / 3.5);
 }
 
+function potongRiwayat(riwayat) {
+  while (riwayat.length > MAKS_PESAN) riwayat.shift();
+}
+
 /* ------------------------------------------------------------ sesi & status */
 
 let SESI;
@@ -708,7 +712,7 @@ function handleToolsCommand(lebar) {
 
   console.log();
   console.log(bingkaiAtas("AI Skills (Tools)", lebar));
-  rows.forEach((row) => {
+  tools.forEach((row) => {
     const [name, desc, example] = row;
     console.log(cat("│ ", C.abu) + cat(name.padEnd(12), C.putih, C.tebal) + cat("│ ", C.abu) + cat(desc, C.putih) + " ".repeat(Math.max(1, lebar - 16 - lebarTeks(name) - lebarTeks(desc))) + cat("│", C.abu));
     console.log(cat("│ ", C.abu) + " ".repeat(14) + cat("Contoh: ", C.abu) + cat(example, C.sian) + " ".repeat(Math.max(1, lebar - 16 - lebarTeks(example))) + cat("│", C.abu));
