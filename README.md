@@ -24,6 +24,7 @@ Everything is written with **only Node.js built-in modules** — no `npm install
 ## ✨ Features
 
 - **🧭 Interactive Setup Wizard** — Guided first-run configuration with two connection modes: *Direct Provider* (API key straight to the vendor) or *Gateway / Proxy* (OmniRoute, 9Router, LiteLLM, ...).
+- **🎭 Agent Skills** — Adopted from Matt Pocock: loadable skill instructions (`/grill-me`, `/tdd`, `/code-review`) that are injected into the system prompt for every request, with `/skills` to list them and `/clear-skill` to turn them off. The active skill shows in the status bar as `[SKILL: nama]`.
 - **🧭 Agent Modes** — Adopted from OpenCode2: `/mode plan` restricts the AI to **read-only** work (`read_file` + whitelisted commands like `ls`, `cat`, `git status`), while `/mode build` unlocks full capabilities. The active mode is always shown in the status bar as `[PLAN]` / `[BUILD]`.
 - **🧠 Persistent Memory** — Adopted from Hermes Agent: `/remember <fact>` stores facts in `~/.config/omnitermux/memory.json`, `/recall` lists them, and every fact is automatically injected into the AI's system prompt at session start.
 - **✂️ Smart File Editing** — Adopted from Oh My Pi: the `edit_file` tool performs targeted string replacement instead of rewriting whole files — safer and far more token-efficient.
@@ -158,6 +159,11 @@ Type these at the `USER >` prompt:
 | `/tools` | List available AI Skills (tools) with usage examples |
 | `/remember <fact>` | Save a fact to persistent memory (e.g. `/remember I like dark coffee`) |
 | `/recall` | Display every fact stored in memory |
+| `/skills` | List available agent skills (plain `.md` files you can edit yourself) |
+| `/grill-me` | Activate skill: interrogate the project before writing any code |
+| `/tdd` | Activate skill: follow strict Red-Green-Refactor cycles |
+| `/code-review` | Activate skill: review freshly written code before declaring done |
+| `/clear-skill` | Deactivate the currently active skill |
 | `/clear` | Clear the terminal screen |
 | `/stats` | Show session statistics (tokens, cost, duration, messages) |
 | `/compact` | Ask the AI to summarize the conversation to save context |
@@ -261,7 +267,8 @@ omnitermux/
 ├── package.json      # Metadata (zero runtime dependencies)
 └── ~/.config/omnitermux/
     ├── config.json   # Your saved configuration
-    └── memory.json   # Persistent memory (facts saved with /remember)
+    ├── memory.json   # Persistent memory (facts saved with /remember)
+    └── skills/       # Agent skills (grill-me.md, tdd.md, code-review.md — editable)
 ```
 
 ---

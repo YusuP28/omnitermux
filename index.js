@@ -27,6 +27,10 @@ const MAKS_PESAN = 20;
 // Mode agen (adopsi OpenCode2): "build" = penuh, "plan" = hanya baca
 let MODE_AKTIF = "build";
 
+// Agent Skills (terinspirasi Matt Pocock) — aktif selama sesi berjalan
+let activeSkill = null; // { nama, isi } | null
+const SKILL_TERSEDIA = ["grill-me", "tdd", "code-review"];
+
 // Whitelist perintah yang diizinkan di mode PLAN (hanya inspeksi/read-only).
 // Pola: cek token pertama (atau awalan berjarak), dilarang ada karakter
 // rantai/redirect shell ( ; & | > < ) agar tidak bisa menyelipkan perintah lain.
@@ -353,7 +357,10 @@ function cetakStatusBar(lebar) {
   const tagMode = MODE_AKTIF === "plan"
     ? cat("[PLAN]", C.kuning, C.tebal)
     : cat("[BUILD]", C.hijau, C.tebal);
-  const kiri = `${cat("●", C.hijau)} ${tagMode} ${cat(model, C.putih, C.tebal)}`;
+  const tagSkill = activeSkill
+    ? " " + cat(`[SKILL: ${activeSkill.nama}]`, C.magenta, C.tebal)
+    : "";
+  const kiri = `${cat("●", C.hijau)} ${tagMode}${tagSkill} ${cat(model, C.putih, C.tebal)}`;
   const tengah = `${cat("tokens:", C.abu)} ${cat(token.toLocaleString(), C.kuning)}`;
   const kanan = `${cat("biaya:", C.abu)} ${cat(biaya, C.hijau)} · ${cat("durasi:", C.abu)} ${cat(durasi, C.putih)}`;
   const isi = `${kiri} ${cat("·", C.abu)} ${tengah} ${cat("·", C.abu)} ${kanan}`;
@@ -489,7 +496,7 @@ async function kirimPesanDenganTool(riwayat, rl, lebar) {
       res = await fetch(`${BASE_URL}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-        body: JSON.stringify({ model: MODEL, messages: riwayat, tools: toolsUntukMode(), tool_choice: "auto", stream: false }),
+        body: JSON.stringify({ model: MODEL, messages: susunPesanDenganSkill(riwayat), tools: toolsUntukMode(), tool_choice: "auto", stream: false }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
@@ -810,6 +817,49 @@ async function handleModeCommand(teks, riwayat) {
   console.log(cat(`\n✖ Mode tidak dikenal: "${arg}". Gunakan: /mode plan atau /mode build`, C.merah));
 }
 
+async function handleSkillsCommand(lebar) {
+  console.log();
+  let daftar = [];
+  try {
+    daftar = (await fs.readdir(SKILLS_DIR))
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => f.slice(0, -3))
+      .sort();
+  } catch {
+    daftar = [];
+  }
+
+  if (daftar.length === 0) {
+    console.log(cat(`  Belum ada skill. Folder: ${SKILLS_DIR}`, C.kuning));
+    console.log(cat("  Jalankan ulang aplikasi untuk membuat skill bawaan.", C.abu));
+    return;
+  }
+
+  console.log(bingkaiAtas("Agent Skills", lebar));
+  for (const nama of daftar) {
+    let judul = "";
+    try {
+      const isi = await fs.readFile(path.join(SKILLS_DIR, `${nama}.md`), "utf-8");
+      judul = isi.split("\n").find((b) => b.startsWith("# "))?.slice(2).trim() || "";
+    } catch { /* file hilang saat dibaca → tampilkan tanpa judul */ }
+
+    const aktif = activeSkill?.nama === nama;
+    const label = `/${nama}`.padEnd(14);
+    const teksPolos = label + judul + (aktif ? " (aktif)" : "");
+    const pad = Math.max(1, lebar - 3 - lebarTeks(teksPolos));
+    console.log(
+      cat("│ ", C.abu) +
+      cat(label, C.kuning) +
+      cat(judul, C.putih) +
+      (aktif ? cat(" (aktif)", C.hijau) : "") +
+      " ".repeat(pad) +
+      cat("│", C.abu)
+    );
+  }
+  console.log(bingkaiBawah(lebar));
+  console.log(cat(`  Aktifkan: ${SKILL_TERSEDIA.map((s) => "/" + s).join(", ")} · /clear-skill untuk mematikan`, C.abu));
+}
+
 function handleClearCommand() {
   // ANSI escape code untuk clear screen
   process.stdout.write("\x1b[2J\x1b[0f");
@@ -834,6 +884,13 @@ async function handleHelpCommand(lebar) {
       ["/recall", "Tampilkan semua fakta yang tersimpan di memori"],
       ["/help", "Tampilkan bantuan ini"],
     ],
+    "Agent Skills": [
+      ["/skills", "Daftar skill yang tersedia di folder skills"],
+      ["/grill-me", "Interogasi dulu: tanya detail proyek sebelum menulis kode"],
+      ["/tdd", "Ikuti alur Test-Driven Development (Red-Green-Refactor)"],
+      ["/code-review", "Review kode yang baru ditulis sebelum menyatakan selesai"],
+      ["/clear-skill", "Matikan skill yang sedang aktif"],
+    ],
   };
 
   console.log();
@@ -842,7 +899,7 @@ async function handleHelpCommand(lebar) {
   for (const [category, commands] of Object.entries(categories)) {
     console.log(cat("│ " + category, C.putih, C.tebal) + " ".repeat(Math.max(1, lebar - 2 - lebarTeks(category))) + cat("│", C.abu));
     commands.forEach(([cmd, desc]) => {
-      console.log(cat("│   ", C.abu) + cat(cmd.padEnd(10), C.kuning) + cat("— ", C.abu) + cat(desc, C.putih) + " ".repeat(Math.max(1, lebar - 14 - lebarTeks(cmd) - lebarTeks(desc))) + cat("│", C.abu));
+      console.log(cat("│   ", C.abu) + cat(cmd.padEnd(14), C.kuning) + cat("— ", C.abu) + cat(desc, C.putih) + " ".repeat(Math.max(1, lebar - 18 - lebarTeks(cmd) - lebarTeks(desc))) + cat("│", C.abu));
     });
     console.log(cat("├" + "─".repeat(Math.max(0, lebar - 2)) + "┤", C.abu));
   }
@@ -1039,7 +1096,115 @@ async function bangunSistemPrompt() {
   return teks;
 }
 
+/* -------------------------------------------- agent skills (Matt Pocock) */
+
+const SKILLS_DIR = path.join(CONFIG_DIR, "skills");
+
+// Skill bawaan — ditulis ke disk hanya jika file belum ada (editan user dihormati)
+const SKILL_BAWAAN = {
+  "grill-me": `# Grill Me — Interogasi Sebelum Kode
+
+Kamu dalam mode GRILL ME. Bertindaklah sebagai interogator yang ramah namun tajam, terinspirasi teknik "grilling" Matt Pocock: menggali keputusan desain lewat pertanyaan sebelum satu baris kode ditulis.
+
+## Aturan main
+1. **JANGAN menulis kode** sampai semua pertanyaan penting terjawab dan kamu merangkum keputusannya.
+2. Ajukan **maksimal 3 pertanyaan** per giliran — bukan daftar panjang.
+3. Urutkan prioritas: (a) tujuan & kriteria sukses, (b) constraint & asumsi, (c) edge case & error handling, (d) strategi testing, (e) scope / apa yang TIDAK dikerjakan.
+4. **Tantang asumsi lemah.** Jika jawaban user ambigu, tunjukkan 2-3 alternatif beserta trade-off-nya, lalu minta memilih.
+5. Setelah semua jelas: rangkum keputusan dalam daftar pendek, minta konfirmasi "lanjut?", dan BARU mulai menulis kode.
+6. Berhenti menggali ketika jawaban sudah cukup untuk implementasi — jangan berlebihan.
+
+## Format pertanyaan
+- Spesifik, satu topik per pertanyaan.
+- Sertakan konsekuensi: "Kalau X, apa yang terjadi saat ...?"
+- Jawankan dulu keputusan yang paling mahal dibatalkan (irreversible decisions first).
+`,
+  "tdd": `# TDD — Red · Green · Refactor
+
+Kamu dalam mode TDD. Ikuti siklus ketat Test-Driven Development untuk setiap perilaku baru.
+
+## Siklus wajib
+1. **RED** — Tulis SATU test yang mewakili perilaku berikutnya. Jalankan dan pastikan **GAGAL** dengan alasan yang benar (bukan error import/konfigurasi). Jika test langsung lulus, test-nya belum cukup spesifik — perbaiki test-nya.
+2. **GREEN** — Tulis implementasi **minimum** agar test lulus. Jangan menulis kode untuk kasus yang belum ditest. Jalankan seluruh test: harus lulus semua.
+3. **REFACTOR** — Rapikan kode dan duplikasi tanpa mengubah perilaku. Jalankan ulang test setelah setiap perubahan.
+
+## Aturan
+- Tidak ada implementasi sebelum test gagal (RED dulu, selalu).
+- Satu perilaku per siklus — jangan menumpuk banyak test sekaligus.
+- Test harus menutupi: happy path, edge case, dan error/invalid input.
+- Sebutkan status setiap langkah: \`RED → ...\`, \`GREEN → ...\`, \`REFACTOR → ...\`.
+- Jika tergoda menulis kode tanpa test, berhenti dan tulis test-nya dulu.
+`,
+  "code-review": `# Code Review — Review Kode yang Baru Ditulis
+
+Kamu dalam mode CODE REVIEW. Setelah kode selesai ditulis (atau saat user minta review), lakukan review mandiri sebelum menyatakan selesai.
+
+## Checklist
+1. **Correctness** — Logika benar di semua jalur? Ada bug tersembunyi?
+2. **Edge case** — Input kosong, null/undefined, angka negatif, string panjang, file hilang?
+3. **Error handling** — Error ditangani dan pesannya membantu? Ada yang ditelan diam-diam?
+4. **Naming & readability** — Nama variabel/fungsi jujur tentang isinya? Ada fungsi terlalu panjang?
+5. **Duplikasi** — Kode berulang yang bisa diekstrak?
+6. **Security** — Input user dipercaya mentah-mentah? Path/command bisa disalahgunakan?
+7. **Tests** — Ada test untuk perilaku baru? Test-nya benar-benar menguji (bukan lulus palsu)?
+8. **Scope** — Perubahan sesuai permintaan? Ada perubahan yang tidak diminta?
+
+## Format laporan
+- 🔴 **Blocking** — harus diperbaiki sebelum selesai.
+- 🟡 **Suggestion** — sebaiknya diperbaiki, beri alasan singkat.
+- 🟢 **Nit** — preferensi gaya, boleh diabaikan.
+- Akhiri dengan **verdict**: \`LULUS\` atau \`PERLU PERBAIKAN\` beserta daftar perbaikan konkret (lokasi + apa yang diubah).
+`,
+};
+
+async function siapkanSkills() {
+  try {
+    await fs.mkdir(SKILLS_DIR, { recursive: true });
+    for (const [nama, isi] of Object.entries(SKILL_BAWAAN)) {
+      const file = path.join(SKILLS_DIR, `${nama}.md`);
+      try {
+        await fs.access(file); // sudah ada → jangan timpa
+      } catch {
+        await fs.writeFile(file, isi, "utf-8");
+      }
+    }
+  } catch {
+    // biarkan gagal senyap; /skills akan memberi pesan jika kosong
+  }
+}
+
+async function bacaSkill(nama) {
+  if (!SKILL_TERSEDIA.includes(nama)) throw new Error(`Skill tidak dikenal: ${nama}`);
+  const file = path.join(SKILLS_DIR, `${nama}.md`);
+  try {
+    return await fs.readFile(file, "utf-8");
+  } catch {
+    throw new Error(`File skill tidak ditemukan: ${file} (jalankan ulang aplikasi untuk membuat skill bawaan)`);
+  }
+}
+
+async function aktifkanSkill(nama) {
+  const isi = await bacaSkill(nama);
+  activeSkill = { nama, isi };
+  return activeSkill;
+}
+
+// Suntikkan skill aktif ke system message SAAT REQUEST dikirim.
+// Riwayat ASLI tidak disentuh — dibuat salinan setiap request agar
+// teks skill tidak menumpuk (akumulasi) pada percakapan berikutnya.
+function susunPesanDenganSkill(riwayat) {
+  if (!activeSkill) return riwayat;
+  const salinan = riwayat.map((m) => ({ ...m }));
+  const sistem = salinan.find((m) => m.role === "system");
+  if (sistem && typeof sistem.content === "string") {
+    sistem.content += `\n\n--- SKILL AKTIF: ${activeSkill.nama} ---\n${activeSkill.isi}\n--- AKHIR SKILL ---`;
+  }
+  return salinan;
+}
+
 async function main() {
+  // Siapkan folder & skill bawaan sebelum sesi dimulai
+  await siapkanSkills();
   // 1. Muat konfigurasi
   let config = await bacaConfig();
   if (!config) {
@@ -1143,6 +1308,31 @@ async function main() {
       }
       console.log(); tanya(); continue;
     }
+    if (teks === "/skills") { console.log(); await handleSkillsCommand(lebar); tanya(); continue; }
+    if (teks === "/clear-skill") {
+      console.log();
+      if (activeSkill) {
+        console.log(cat(`  🎯 Skill dimatikan: ${activeSkill.nama}`, C.abu));
+        activeSkill = null;
+      } else {
+        console.log(cat("  Tidak ada skill yang aktif.", C.abu));
+      }
+      console.log(); tanya(); continue;
+    }
+    if (teks.startsWith("/") && SKILL_TERSEDIA.includes(teks.slice(1))) {
+      const nama = teks.slice(1);
+      console.log();
+      try {
+        const skill = await aktifkanSkill(nama);
+        const judul = skill.isi.split("\n").find((b) => b.startsWith("# "))?.slice(2).trim() || nama;
+        console.log(cat(`  🎯 Skill aktif: ${nama}`, C.magenta, C.tebal));
+        console.log(cat(`     ${judul}`, C.putih));
+        console.log(cat("     Aktif untuk semua pesan berikutnya · /clear-skill untuk mematikan", C.abu));
+      } catch (err) {
+        console.log(cat(`  ✖ ${err.message}`, C.merah));
+      }
+      console.log(); tanya(); continue;
+    }
     if (teks === "/clear") { handleClearCommand(); tanya(); continue; }
     if (teks === "/reset") {
       riwayat.length = 0;
@@ -1217,4 +1407,4 @@ if (require.main === module) {
   main().catch((err) => { console.error("Terjadi kesalahan tak terduga:", err); process.exitCode = 1; });
 }
 
-module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, perintahPlanDiizinkan, toolsUntukMode, bangunSistemPrompt, muatMemori };
+module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, perintahPlanDiizinkan, toolsUntukMode, bangunSistemPrompt, muatMemori, siapkanSkills, susunPesanDenganSkill, aktifkanSkill, SKILLS_DIR };
