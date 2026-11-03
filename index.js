@@ -10,12 +10,15 @@
 const readline = require("node:readline");
 const { stdin, stdout } = require("node:process");
 const { daftarTools, eksekusiTool } = require("./tools.js");
+const { bacaConfig, jalankanSetup, CONFIG_FILE } = require("./setup.js");
 
 /* ------------------------------------------------------------ konfigurasi */
 
-const BASE_URL = (process.env.OMNIROUTE_BASE_URL || "http://localhost:20128/v1").replace(/\/+$/, "");
-const MODEL = process.env.OMNIROUTE_MODEL || "ALL-FREE";
-const API_KEY = process.env.OMNIROUTE_API_KEY;
+// Konfigurasi akan dimuat dari ~/.config/omnitermux/config.json
+// Fallback ke env vars untuk backward compatibility
+let BASE_URL = "";
+let MODEL = "";
+let API_KEY = "";
 const TIMEOUT_MS = 120_000;
 
 // metadata combo mendeklarasikan context 4096, jadi riwayat sengaja dibatasi
@@ -302,13 +305,7 @@ function hitungTokenPerkiraan(teks) {
 
 /* ------------------------------------------------------------ sesi & status */
 
-const SESI = {
-  mulai: Date.now(),
-  tokenTotal: 0,
-  modelAktif: MODEL,
-  pesanDikirim: 0,
-  pesanDiterima: 0,
-};
+let SESI;
 
 function formatDurasi(ms) {
   const detik = Math.floor(ms / 1000);
@@ -612,14 +609,37 @@ function pesanHTTP(status, detail) {
 /* ------------------------------------------------------------ main */
 
 async function main() {
+  // 1. Muat konfigurasi
+  let config = await bacaConfig();
+  if (!config) {
+    console.log(`\n${cat("⚙️  Konfigurasi tidak ditemukan.", C.kuning)}`);
+    console.log(`${cat("   Menjalankan setup interaktif...", C.abu)}\n`);
+    config = await jalankanSetup();
+  }
+
+  // 2. Set variabel global dari config
+  BASE_URL = (config.baseUrl || "http://localhost:20128/v1").replace(/\/+$/, "");
+  MODEL = config.model || "ALL-FREE";
+  API_KEY = config.apiKey || "";
+
   if (!API_KEY) {
-    console.error("OMNIROUTE_API_KEY belum diset.");
-    console.error("  Contoh: export OMNIROUTE_API_KEY=sk-...");
+    console.error(cat("✖  API Key tidak ditemukan di konfigurasi.", C.merah));
+    console.error(`  Jalankan: ${cat("rm ~/.config/omnitermux/config.json", C.kuning)} untuk setup ulang.`);
     process.exitCode = 1;
     return;
   }
 
   const lebar = lebarTampilan();
+
+  // Inisialisasi sesi setelah config dimuat
+  SESI = {
+    mulai: Date.now(),
+    tokenTotal: 0,
+    modelAktif: MODEL,
+    pesanDikirim: 0,
+    pesanDiterima: 0,
+  };
+
   const rl = readline.createInterface({
     input: stdin,
     output: stdout,
