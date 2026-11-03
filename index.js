@@ -3,11 +3,13 @@
 
 /**
  * omnitermux — CLI chat modern lewat OmniRoute (Combo ALL-FREE).
- * Hanya memakai modul bawaan Node.js, tanpa dependensi eksternal.
+ * Tool Calling (OpenAI Function Calling) + Workspace sandbox.
+ * Hanya modul bawaan Node.js, tanpa dependensi eksternal.
  */
 
 const readline = require("node:readline");
 const { stdin, stdout } = require("node:process");
+const { daftarTools, eksekusiTool } = require("./tools.js");
 
 /* ------------------------------------------------------------ konfigurasi */
 
@@ -24,12 +26,10 @@ const LEBAR_MAKS = 70;
 const LEBAR_MIN = 40;
 
 // versi aplikasi
-const VERSI = "0.3.0";
+const VERSI = "0.4.0";
 
 /* ------------------------------------------------------------------ warna */
 
-// Warna hanya dipakai saat output benar-benar terminal. Saat output dipipa
-// (mis. ke file) semua kode ANSI dimatikan supaya teksnya bersih.
 const PAKAI_WARNA = Boolean(stdout.isTTY) && !process.env.NO_COLOR;
 const esc = (kode) => (PAKAI_WARNA ? `\x1b[${kode}m` : "");
 
@@ -297,8 +297,6 @@ function mulaiSpinner(label) {
 /* ------------------------------------------------------------ token hitung */
 
 function hitungTokenPerkiraan(teks) {
-  // Perkiraan kasar: 1 token ≈ 4 karakter (Bahasa Indonesia/Inggris campur)
-  // Lebih konservatif dari 3-4 char/token standar OpenAI
   return Math.ceil(String(teks).length / 3.5);
 }
 
@@ -320,7 +318,6 @@ function formatDurasi(ms) {
 }
 
 function hitungBiayaPerkiraan(token) {
-  // Gratis (ALL-FREE), tapi tampilkan format standar
   return "$0.00";
 }
 
@@ -330,7 +327,6 @@ function cetakStatusBar(lebar) {
   const model = SESI.modelAktif;
   const token = SESI.tokenTotal;
   const biaya = hitungBiayaPerkiraan(token);
-  // Layout: [Model] · [Tokens] · [Cost] · [Durasi]
   const kiri = `${cat("●", C.hijau)} ${cat(model, C.putih, C.tebal)}`;
   const tengah = `${cat("tokens:", C.abu)} ${cat(token.toLocaleString(), C.kuning)}`;
   const kanan = `${cat("biaya:", C.abu)} ${cat(biaya, C.hijau)} · ${cat("durasi:", C.abu)} ${cat(durasi, C.putih)}`;
@@ -338,6 +334,168 @@ function cetakStatusBar(lebar) {
   const garis = "─".repeat(Math.max(0, lebar - lebarTeks(isi) - 2));
   console.log(cat("┌", C.abu) + isi + " " + garis + cat("┐", C.abu));
 }
+
+/* ------------------------------------------------------------ UI: tool */
+
+function cetakToolCall(namaTool, argumen) {
+  const label = cat("🔧", C.magenta) + " " + cat(namaTool, C.putih, C.tebal);
+  let detail = "";
+  if (namaTool === "read_file") detail = `file: ${argumen.path}`;
+  else if (namaTool === "write_file") detail = `file: ${argumen.path} (${argumen.content.length} char)`;
+  else if (namaTool === "run_command") detail = `cmd: ${argumen.command}`;
+  console.log("  " + label + (detail ? " " + cat(detail, C.abu) : ""));
+}
+
+async function mintaKonfirmasi(namaTool, argumen) {
+  if (process.env.OMNITERMUX_AUTO_APPROVE === "1") return true;
+  const teks = cat("⚠️  ", C.kuning) + cat("Izinkan ", C.putih) + cat(namaTool, C.putih, C.tebal) + cat("?", C.putih);
+  if (!stdout.isTTY) return false;
+  return new Promise((resolve) => {
+    process.stdout.write("  " + teks + " " + cat("(y/N) ", C.kuning) + " ");
+    let buffer = "";
+    const onData = (chunk) => { buffer += chunk; };
+    const onEnd = () => {
+      stdin.removeListener("data", onData);
+      stdin.removeListener("end", onEnd);
+      const input = buffer.trim();
+      resolve(input.toLowerCase() === "y");
+    };
+    stdin.on("data", onData);
+    stdin.once("end", onEnd);
+    setTimeout(() => { stdin.removeListener("data", onData); resolve(false); }, 10_000);
+  });
+}
+
+/* ------------------------------------------------------------ tool execution loop */
+
+async function eksekusiToolCalls(riwayat, toolCalls, rl, lebar) {
+  for (const call of toolCalls) {
+    const { id, function: fn } = call;
+    const namaTool = fn.name;
+    let argumen;
+    try { argumen = JSON.parse(fn.arguments); } catch { argumen = {}; }
+
+    // Tampilkan indikator tool call
+    cetakToolCall(namaTool, argumen);
+
+    // Konfirmasi untuk tool yang mengubah state
+    let diizinkan = true;
+    if (namaTool === "write_file" || namaTool === "run_command") {
+      diizinkan = await mintaKonfirmasi(namaTool, argumen);
+    }
+
+    let hasilTool;
+    if (!diizinkan) {
+      hasilTool = { ok: false, error: "Ditolak oleh pengguna" };
+      console.log("  " + cat("⛔ Ditolak oleh pengguna", C.merah));
+    } else {
+      try {
+        hasilTool = await eksekusiTool(namaTool, argumen);
+      } catch (err) {
+        hasilTool = { ok: false, error: err.message };
+      }
+    }
+
+    // Kirim hasil kembali ke riwayat sebagai role "tool"
+    const content = typeof hasilTool === "object" ? JSON.stringify(hasilTool) : String(hasilTool);
+    riwayat.push({
+      role: "tool",
+      tool_call_id: id,
+      content: content,
+    });
+
+    // Tampilkan ringkasan hasil
+    if (hasilTool.ok) {
+      let ringkasan = "✅ Berhasil";
+      if (hasilTool.content) ringkasan += `: ${String(hasilTool.content).slice(0, 100)}`;
+      else if (hasilTool.stdout) ringkasan += `: ${hasilTool.stdout.slice(0, 100)}`;
+      else if (hasilTool.written) ringkasan += `: ${hasilTool.written} bytes written`;
+      console.log("  " + cat(ringkasan, C.hijau));
+    } else {
+      const err = hasilTool.error || "Error tidak diketahui";
+      console.log("  " + cat("❌ " + err, C.merah));
+    }
+  }
+}
+
+/* ------------------------------------------------------------ API dengan tool loop */
+
+async function kirimPesanDenganTool(riwayat, rl, lebar) {
+  const url = `${BASE_URL}/chat/completions`;
+
+  while (true) {
+    let res;
+    try {
+      res = await fetch(`${BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
+        body: JSON.stringify({ model: MODEL, messages: riwayat, tools: daftarTools, tool_choice: "auto", stream: false }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch (err) {
+      gagal(pesanJaringan(err, BASE_URL));
+    }
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const teks = await res.text();
+        try { detail = JSON.parse(teks)?.error?.message ?? teks; } catch { detail = teks; }
+      } catch {}
+      gagal(pesanHTTP(res.status, String(detail).slice(0, 300)));
+    }
+    let data;
+    try { data = await res.json(); } catch { gagal("Balasan server bukan JSON yang valid."); }
+
+    const choice = data?.choices?.[0];
+    if (!choice) gagal("Server tidak mengembalikan choices.");
+
+    const message = choice.message;
+    const toolCalls = message.tool_calls;
+
+    // Simpan pesan assistant (bisa berisi content + tool_calls)
+    riwayat.push({
+      role: "assistant",
+      content: message.content || null,
+      tool_calls: toolCalls || undefined,
+    });
+
+    if (!toolCalls || toolCalls.length === 0) {
+      // Balasan final (teks biasa)
+      const balasan = message.content;
+      if (typeof balasan !== "string") gagal("Server membalas tanpa isi (choices[0].message.content tidak ada).");
+      return { teks: balasan, model: data?.model || MODEL };
+    }
+
+    // Ada tool_calls → eksekusi loop
+    await eksekusiToolCalls(riwayat, toolCalls, rl, lebar);
+
+    // Loop kembali: kirim riwayat (termasuk hasil tool) ke API lagi
+    // Status bar sudah dicetak di main loop, tidak perlu cetak ulang di sini
+  }
+}
+
+/* ------------------------------------------------------------ token & status */
+
+function hitungTokenPerkiraan(teks) { return Math.ceil(String(teks).length / 3.5); }
+
+function formatDurasi(ms) { const d = Math.floor(ms/1000); const m=Math.floor(d/60); const s=d%60; return m>0?`${m}m ${s}s`:`${s}s`; }
+function hitungBiayaPerkiraan(t) { return "$0.00"; }
+
+function cetakStatusBar(lebar) {
+  const s = Date.now();
+  const durasi = formatDurasi(s - SESI.mulai);
+  const model = SESI.modelAktif;
+  const token = SESI.tokenTotal;
+  const biaya = hitungBiayaPerkiraan(token);
+  const kiri = `${cat("●", C.hijau)} ${cat(model, C.putih, C.tebal)}`;
+  const tengah = `${cat("tokens:", C.abu)} ${cat(token.toLocaleString(), C.kuning)}`;
+  const kanan = `${cat("biaya:", C.abu)} ${cat(biaya, C.hijau)} · ${cat("durasi:", C.abu)} ${cat(durasi, C.putih)}`;
+  const isi = `${kiri} ${cat("·", C.abu)} ${tengah} ${cat("·", C.abu)} ${kanan}`;
+  const garis = "─".repeat(Math.max(0, lebar - lebarTeks(isi) - 2));
+  console.log(cat("┌", C.abu) + isi + " " + garis + cat("┐", C.abu));
+}
+
+/* ------------------------------------------------------------ UI: banner, help, stats */
 
 function cetakBanner(lebar) {
   const garis = "─".repeat(lebar);
@@ -366,16 +524,14 @@ function cetakBantuan(lebar) {
     ["/model", "tampilkan model & endpoint yang dipakai"],
     ["exit", "keluar (juga: quit, /exit, atau Ctrl+C)"],
   ];
-  for (const [p, a] of perintah) {
-    console.log("  " + cat(p.padEnd(8), C.kuning) + cat(a, C.abu));
-  }
+  for (const [p, a] of perintah) console.log("  " + cat(p.padEnd(8), C.kuning) + cat(a, C.abu));
   console.log("  " + cat("Lebar tampilan", C.abu) + ": " + cat(`${lebar} kolom`, C.putih));
   console.log();
 }
 
 function cetakStatistik(lebar) {
-  const sekarang = Date.now();
-  const durasi = formatDurasi(sekarang - SESI.mulai);
+  const s = Date.now();
+  const durasi = formatDurasi(s - SESI.mulai);
   const biaya = hitungBiayaPerkiraan(SESI.tokenTotal);
   console.log();
   console.log(bingkaiAtas("Statistik Sesi", lebar));
@@ -395,34 +551,30 @@ function cetakStatistik(lebar) {
 }
 
 async function mintaRingkasan(riwayat) {
-  const promptRingkas = "Ringkas percakapan di atas menjadi satu paragraf padat (maks 150 kata) yang menangkap poin-poin kunci, keputusan, dan konteks penting. Jangan gunakan markdown. Bahasa Indonesia.";
-  const riwayatRingkas = [...riwayat, { role: "user", content: promptRingkas }];
+  const prompt = "Ringkas percakapan di atas menjadi satu paragraf padat (maks 150 kata) yang menangkap poin-poin kunci, keputusan, dan konteks penting. Jangan gunakan markdown. Bahasa Indonesia.";
   const url = `${BASE_URL}/chat/completions`;
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify({ model: MODEL, messages: riwayatRingkas, stream: false, max_tokens: 500 }),
+      body: JSON.stringify({ model: MODEL, messages: [...riwayat, { role: "user", content: prompt }], stream: false, max_tokens: 500 }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) return null;
     const data = await res.json();
     return data?.choices?.[0]?.message?.content?.trim() || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
+
+/* ------------------------------------------------------------ cetak balasan & error */
 
 function cetakBalasan(hasil, lebar) {
   const dalam = Math.max(24, lebar - 4);
   console.log(bingkaiAtas(`AI · ${hasil.model}`, lebar));
   const isi = hasil.teks.trim() === "" ? "(balasan kosong)" : hasil.teks;
   for (const baris of siapkanIsi(isi, dalam)) {
-    if (baris === "") {
-      console.log(cat("│", C.abu));
-    } else {
-      console.log(cat("│ ", C.abu) + cat(formatBaris(baris), C.putih));
-    }
+    if (baris === "") console.log(cat("│", C.abu));
+    else console.log(cat("│ ", C.abu) + cat(formatBaris(baris), C.putih));
   }
   console.log(bingkaiBawah(lebar));
   console.log();
@@ -431,45 +583,11 @@ function cetakBalasan(hasil, lebar) {
 function cetakGalat(judul, pesan, lebar) {
   console.log();
   console.log("  " + cat("✖ " + judul, C.merah, C.tebal));
-  for (const baris of bungkus(pesan, Math.max(20, lebar - 4))) {
-    console.log("    " + cat(baris, C.merah));
-  }
+  for (const baris of bungkus(pesan, Math.max(20, lebar - 4))) console.log("    " + cat(baris, C.merah));
   console.log();
 }
 
-/* -------------------------------------------------------------------- API */
-
-async function kirimPesan(riwayat) {
-  const url = `${BASE_URL}/chat/completions`;
-  let res;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify({ model: MODEL, messages: riwayat, stream: false }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch (err) {
-    gagal(pesanJaringan(err, url));
-  }
-  if (!res.ok) {
-    let detail = "";
-    try {
-      const teks = await res.text();
-      try { detail = JSON.parse(teks)?.error?.message ?? teks; } catch { detail = teks; }
-    } catch { /* abaikan */ }
-    gagal(pesanHTTP(res.status, String(detail).slice(0, 300)));
-  }
-  let data;
-  try { data = await res.json(); } catch { gagal("Balasan server bukan JSON yang valid."); }
-  const balasan = data?.choices?.[0]?.message?.content;
-  if (typeof balasan !== "string") gagal("Server membalas tanpa isi (choices[0].message.content tidak ada).");
-  return { teks: balasan, model: data?.model || MODEL };
-}
-
-function potongRiwayat(riwayat) {
-  while (riwayat.length > MAKS_PESAN) riwayat.shift();
-}
+/* ------------------------------------------------------------ util error */
 
 function gagal(pesan) { throw new Error(pesan); }
 
@@ -490,7 +608,7 @@ function pesanHTTP(status, detail) {
   return `Permintaan ditolak (HTTP ${status}).${ekor}`;
 }
 
-/* ------------------------------------------------------------------- main */
+/* ------------------------------------------------------------ main */
 
 async function main() {
   if (!API_KEY) {
@@ -506,16 +624,23 @@ async function main() {
     output: stdout,
     terminal: stdout.isTTY,
   });
-  const riwayat = [];
+  const riwayat = [
+    {
+      role: "system",
+      content: "Kamu adalah asisten AI yang memiliki akses ke tool: read_file, write_file, run_command. " +
+        "GUNAKAN TOOL LANGSUNG tanpa menanyakan izin via teks. " +
+        "Jika user minta baca/tulis file atau jalankan perintah, PANGGIL TOOL LANGSUNG. " +
+        "Jangan tanya 'Apakah Anda mengizinkan?' via chat. " +
+        "Tool confirmation ditangani oleh sistem, bukan olehmu. " +
+        "Bahasa Indonesia."
+    }
+  ];
   let keluar = false;
 
-  // Banner pembuka
   cetakBanner(lebar);
 
-  // Ctrl+C saat menunggu input: tutup antrean baris, bukan mematikan proses
   rl.on("SIGINT", () => rl.close());
 
-  // Penjaga prompt agar tidak error saat interface sudah tertutup
   const tanya = () => {
     if (!stdout.isTTY) return;
     try { rl.prompt(); } catch (err) {
@@ -526,18 +651,12 @@ async function main() {
   rl.setPrompt("  " + cat("USER", C.hijau, C.tebal) + cat(" > ", C.abu));
   tanya();
 
-  // Async iterator supaya tidak ada baris yang terlewat
   for await (const baris of rl) {
     const teks = baris.trim();
 
-    if (teks === "exit" || teks === "quit" || teks === "/exit") {
-      keluar = true;
-      rl.close();
-      break;
-    }
+    if (teks === "exit" || teks === "quit" || teks === "/exit") { keluar = true; rl.close(); break; }
     if (teks === "") { tanya(); continue; }
 
-    // Perintah slash
     if (teks === "/help") { console.log(); cetakBantuan(lebar); tanya(); continue; }
     if (teks === "/stats") { console.log(); cetakStatistik(lebar); tanya(); continue; }
     if (teks === "/model") { console.log(); console.log("  " + cat(MODEL, C.putih) + cat(" @ ", C.abu) + cat(BASE_URL, C.putih)); console.log(); tanya(); continue; }
@@ -555,35 +674,31 @@ async function main() {
         console.log("  " + cat(ringkasan, C.putih));
         console.log();
         SESI.tokenTotal = hitungTokenPerkiraan(ringkasan);
-      } else {
-        console.log("  " + cat("Gagal membuat ringkasan.", C.merah));
-      }
-      console.log();
-      tanya();
-      continue;
+      } else { console.log("  " + cat("Gagal membuat ringkasan.", C.merah)); }
+      console.log(); tanya(); continue;
     }
 
-    // Pesan biasa
+    // Pesan user biasa
     riwayat.push({ role: "user", content: teks });
     potongRiwayat(riwayat);
     SESI.pesanDikirim += 1;
     SESI.tokenTotal += hitungTokenPerkiraan(teks);
 
-    // Status bar di atas spinner
+    // Status bar
     cetakStatusBar(lebar);
 
+    // Spinner
     const spinner = mulaiSpinner("Berpikir...");
     let hasil;
     try {
-      hasil = await kirimPesan(riwayat);
+      hasil = await kirimPesanDenganTool(riwayat, rl, lebar);
     } catch (err) {
       spinner.berhenti();
       cetakGalat("Gagal", err.message, lebar);
       riwayat.pop();
       SESI.pesanDikirim -= 1;
       SESI.tokenTotal -= hitungTokenPerkiraan(teks);
-      tanya();
-      continue;
+      tanya(); continue;
     }
     spinner.berhenti();
 
@@ -602,20 +717,28 @@ async function main() {
   console.log();
 }
 
-if (require.main === module) {
-  main().catch((err) => {
-    console.error("Terjadi kesalahan tak terduga:", err);
-    process.exitCode = 1;
-  });
+/* ------------------------------------------------------------ util & export */
+
+function potongRiwayat(r) { while (r.length > MAKS_PESAN) r.shift(); }
+function gagal(p) { throw new Error(p); }
+function pesanJaringan(err, url) {
+  if (err && err.name === "TimeoutError") return `Server tidak merespons dalam ${TIMEOUT_MS / 1000} detik (${url}).`;
+  const kode = err && err.cause && err.cause.code;
+  if (kode === "ECONNREFUSED") return `Tidak bisa terhubung ke ${url}.\nServer OmniRoute sepertinya mati. Coba jalankan: omnirouter start`;
+  if (kode === "ENOTFOUND" || kode === "EAI_AGAIN") return `Alamat ${url} tidak bisa dijangkau (DNS gagal).`;
+  return `Gagal menghubungi ${url}: ${(err && err.message) || String(err)}`;
+}
+function pesanHTTP(status, detail) {
+  const ekor = detail ? `\nDetail dari server: ${detail}` : "";
+  if (status === 401 || status === 403) return `API key ditolak (HTTP ${status}). Periksa variabel OMNIROUTE_API_KEY.${ekor}`;
+  if (status === 404) return `Model "${MODEL}" tidak ditemukan di OmniRoute (HTTP 404).${ekor}`;
+  if (status === 429) return `Kena rate limit (HTTP 429). Tunggu sebentar lalu coba lagi.${ekor}`;
+  if (status >= 500) return `Server OmniRoute bermasalah (HTTP ${status}).${ekor}`;
+  return `Permintaan ditolak (HTTP ${status}).${ekor}`;
 }
 
-module.exports = {
-  kirimPesan,
-  pesanHTTP,
-  pesanJaringan,
-  bungkus,
-  lebarTampilan,
-  lebarTeks,
-  siapkanIsi,
-  formatTabel,
-};
+if (require.main === module) {
+  main().catch((err) => { console.error("Terjadi kesalahan tak terduga:", err); process.exitCode = 1; });
+}
+
+module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel };
