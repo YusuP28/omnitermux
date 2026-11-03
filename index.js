@@ -9,7 +9,7 @@
 const readline = require("node:readline");
 const { stdin, stdout } = require("node:process");
 const { daftarTools, eksekusiTool } = require("./tools.js");
-const { bacaConfig, jalankanSetup, CONFIG_FILE, DIRECT_PROVIDERS } = require("./setup.js");
+const { bacaConfig, jalankanSetup, CONFIG_FILE, CONFIG_DIR, DIRECT_PROVIDERS } = require("./setup.js");
 
 /* ------------------------------------------------------------ konfigurasi */
 
@@ -23,6 +23,26 @@ const TIMEOUT_MS = 120_000;
 
 // metadata combo mendeklarasikan context 4096, jadi riwayat sengaja dibatasi
 const MAKS_PESAN = 20;
+
+// Mode agen (adopsi OpenCode2): "build" = penuh, "plan" = hanya baca
+let MODE_AKTIF = "build";
+
+// Whitelist perintah yang diizinkan di mode PLAN (hanya inspeksi/read-only).
+// Pola: cek token pertama (atau awalan berjarak), dilarang ada karakter
+// rantai/redirect shell ( ; & | > < ) agar tidak bisa menyelipkan perintah lain.
+const PLAN_WHITELIST = [
+  "ls", "cat", "pwd", "head", "tail", "wc", "grep", "find", "stat", "du", "df",
+  "which", "file", "date", "whoami", "uname", "echo",
+  "git status", "git diff", "git log", "git branch", "git remote -v", "git show",
+  "node --version", "npm --version", "python --version",
+];
+
+function perintahPlanDiizinkan(command) {
+  const c = String(command || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!c) return false;
+  if (/[;&|><]/.test(c)) return false; // tanpa chaining, pipe, atau redirect
+  return PLAN_WHITELIST.some((p) => c === p || c.startsWith(p + " "));
+}
 
 // batas lebar tampilan agar nyaman di layar HP (bisa dioverride lewat env)
 const LEBAR_MAKS = 70;
@@ -330,7 +350,10 @@ function cetakStatusBar(lebar) {
   const model = SESI.modelAktif;
   const token = SESI.tokenTotal;
   const biaya = hitungBiayaPerkiraan(token);
-  const kiri = `${cat("●", C.hijau)} ${cat(model, C.putih, C.tebal)}`;
+  const tagMode = MODE_AKTIF === "plan"
+    ? cat("[PLAN]", C.kuning, C.tebal)
+    : cat("[BUILD]", C.hijau, C.tebal);
+  const kiri = `${cat("●", C.hijau)} ${tagMode} ${cat(model, C.putih, C.tebal)}`;
   const tengah = `${cat("tokens:", C.abu)} ${cat(token.toLocaleString(), C.kuning)}`;
   const kanan = `${cat("biaya:", C.abu)} ${cat(biaya, C.hijau)} · ${cat("durasi:", C.abu)} ${cat(durasi, C.putih)}`;
   const isi = `${kiri} ${cat("·", C.abu)} ${tengah} ${cat("·", C.abu)} ${kanan}`;
@@ -345,6 +368,7 @@ function cetakToolCall(namaTool, argumen) {
   let detail = "";
   if (namaTool === "read_file") detail = `file: ${argumen.path}`;
   else if (namaTool === "write_file") detail = `file: ${argumen.path} (${argumen.content.length} char)`;
+  else if (namaTool === "edit_file") detail = `file: ${argumen.path} (edit ${String(argumen.old_string ?? "").length}→${String(argumen.new_string ?? "").length} char)`;
   else if (namaTool === "run_command") detail = `cmd: ${argumen.command}`;
   console.log("  " + label + (detail ? " " + cat(detail, C.abu) : ""));
 }
@@ -382,16 +406,29 @@ async function eksekusiToolCalls(riwayat, toolCalls, rl, lebar) {
     // Tampilkan indikator tool call
     cetakToolCall(namaTool, argumen);
 
-    // Konfirmasi untuk tool yang mengubah state
+    // Penegakan mode PLAN (adopsi OpenCode2): hanya read_file & perintah aman
     let diizinkan = true;
-    if (namaTool === "write_file" || namaTool === "run_command") {
+    let alasanTolak = "";
+    if (MODE_AKTIF === "plan") {
+      if (namaTool === "write_file" || namaTool === "edit_file") {
+        diizinkan = false;
+        alasanTolak = "Diblokir mode PLAN: hanya boleh membaca, tidak menulis/mengedit file";
+      } else if (namaTool === "run_command" && !perintahPlanDiizinkan(argumen.command)) {
+        diizinkan = false;
+        alasanTolak = `Diblokir mode PLAN: perintah di luar whitelist (hanya ls, cat, git status, dll.): ${String(argumen.command).slice(0, 80)}`;
+      }
+    }
+
+    // Konfirmasi untuk tool yang mengubah state (write_file, edit_file, run_command)
+    if (diizinkan && (namaTool === "write_file" || namaTool === "edit_file" || namaTool === "run_command")) {
       diizinkan = await mintaKonfirmasi(namaTool, argumen);
+      if (!diizinkan) alasanTolak = "Ditolak oleh pengguna";
     }
 
     let hasilTool;
     if (!diizinkan) {
-      hasilTool = { ok: false, error: "Ditolak oleh pengguna" };
-      console.log("  " + cat("⛔ Ditolak oleh pengguna", C.merah));
+      hasilTool = { ok: false, error: alasanTolak || "Ditolak oleh pengguna" };
+      console.log("  " + cat("⛔ " + (alasanTolak || "Ditolak oleh pengguna"), C.merah));
     } else {
       try {
         hasilTool = await eksekusiTool(namaTool, argumen);
@@ -424,6 +461,25 @@ async function eksekusiToolCalls(riwayat, toolCalls, rl, lebar) {
 
 /* ------------------------------------------------------------ API dengan tool loop */
 
+// Susun daftar tool sesuai mode agen.
+// Mode PLAN: hanya read_file + run_command (dengan deskripsi whitelist),
+// write_file/edit_file tidak dikirim ke model sama sekali.
+function toolsUntukMode() {
+  if (MODE_AKTIF !== "plan") return daftarTools;
+  return daftarTools
+    .filter((t) => t.function.name === "read_file" || t.function.name === "run_command")
+    .map((t) => {
+      if (t.function.name !== "run_command") return t;
+      return {
+        ...t,
+        function: {
+          ...t.function,
+          description: "Menjalankan perintah shell HANYA yang read-only & aman (ls, cat, pwd, git status, git diff, git log, node --version, dll) — MODE PLAN melarang perintah yang mengubah sistem",
+        },
+      };
+    });
+}
+
 async function kirimPesanDenganTool(riwayat, rl, lebar) {
   const url = `${BASE_URL}/chat/completions`;
 
@@ -433,7 +489,7 @@ async function kirimPesanDenganTool(riwayat, rl, lebar) {
       res = await fetch(`${BASE_URL}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-        body: JSON.stringify({ model: MODEL, messages: riwayat, tools: daftarTools, tool_choice: "auto", stream: false }),
+        body: JSON.stringify({ model: MODEL, messages: riwayat, tools: toolsUntukMode(), tool_choice: "auto", stream: false }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
@@ -708,6 +764,7 @@ function handleToolsCommand(lebar) {
   const tools = [
     ["read_file", "Membaca isi file di workspace", 'read_file({ "path": "file.txt" })'],
     ["write_file", "Menulis/membuat file di workspace", 'write_file({ "path": "file.txt", "content": "isi" })'],
+    ["edit_file", "Mengganti teks spesifik (hemat token)", 'edit_file({ "path": "file.txt", "old_string": "a", "new_string": "b" })'],
     ["run_command", "Menjalankan perintah shell (timeout 10s)", 'run_command({ "command": "ls -la" })'],
   ];
 
@@ -720,6 +777,37 @@ function handleToolsCommand(lebar) {
   });
   console.log(bingkaiBawah(lebar));
   console.log();
+}
+
+async function handleModeCommand(teks, riwayat) {
+  const arg = teks.split(/\s+/).slice(1).join(" ").toLowerCase();
+
+  if (arg === "build" || arg === "plan") {
+    if (arg === MODE_AKTIF) {
+      console.log(cat(`  Mode sudah aktif: ${MODE_AKTIF.toUpperCase()}`, C.abu));
+      return;
+    }
+    MODE_AKTIF = arg;
+    riwayat[0].content = await bangunSistemPrompt(); // segarkan konteks AI
+    if (MODE_AKTIF === "plan") {
+      console.log(cat("\n✅ Mode aktif: PLAN", C.kuning, C.tebal));
+      console.log(cat("   AI hanya boleh membaca (read_file) dan perintah aman (ls, cat, git status, ...).", C.abu));
+      console.log(cat("   Penulisan file & perintah berbahaya DIBLOKIR sistem.", C.abu));
+    } else {
+      console.log(cat("\n✅ Mode aktif: BUILD", C.hijau, C.tebal));
+      console.log(cat("   AI bebas membaca, menulis, mengedit file, dan menjalankan perintah.", C.abu));
+    }
+    return;
+  }
+
+  if (arg === "") {
+    console.log(cat(`\n🧭 Mode saat ini: ${MODE_AKTIF.toUpperCase()}`, C.putih, C.tebal));
+    console.log(cat("   /mode plan  — mode aman: hanya baca (whitelist ls, cat, git status, dll)", C.abu));
+    console.log(cat("   /mode build — mode penuh: baca + tulis + edit + eksekusi", C.abu));
+    return;
+  }
+
+  console.log(cat(`\n✖ Mode tidak dikenal: "${arg}". Gunakan: /mode plan atau /mode build`, C.merah));
 }
 
 function handleClearCommand() {
@@ -738,9 +826,12 @@ async function handleHelpCommand(lebar) {
       ["exit", "Keluar (juga: quit, /exit, atau Ctrl+C)"],
     ],
     "Konfigurasi & Alat": [
+      ["/mode", "Ganti mode agen: /mode plan (hanya baca) atau /mode build (penuh)"],
       ["/model", "Pilih model AI interaktif (Direct Provider)"],
       ["/config", "Lihat & ubah konfigurasi (provider, model, API key)"],
       ["/tools", "Lihat daftar AI Skills (tools) yang tersedia"],
+      ["/remember", "Simpan fakta ke memori persisten (/remember <fakta>)"],
+      ["/recall", "Tampilkan semua fakta yang tersimpan di memori"],
       ["/help", "Tampilkan bantuan ini"],
     ],
   };
@@ -796,27 +887,6 @@ function tanyaYesNoRL(rl, pertanyaan, defaultYes = true) {
       else throw err;
     }
   });
-}
-
-/* ------------------------------------------------------------ token & status */
-
-function hitungTokenPerkiraan(teks) { return Math.ceil(String(teks).length / 3.5); }
-
-function formatDurasi(ms) { const d = Math.floor(ms/1000); const m=Math.floor(d/60); const s=d%60; return m>0?`${m}m ${s}s`:`${s}s`; }
-function hitungBiayaPerkiraan(t) { return "$0.00"; }
-
-function cetakStatusBar(lebar) {
-  const sekarang = Date.now();
-  const durasi = formatDurasi(sekarang - SESI.mulai);
-  const model = SESI.modelAktif;
-  const token = SESI.tokenTotal;
-  const biaya = hitungBiayaPerkiraan(token);
-  const kiri = `${cat("●", C.hijau)} ${cat(model, C.putih, C.tebal)}`;
-  const tengah = `${cat("tokens:", C.abu)} ${cat(token.toLocaleString(), C.kuning)}`;
-  const kanan = `${cat("biaya:", C.abu)} ${cat(biaya, C.hijau)} · ${cat("durasi:", C.abu)} ${cat(durasi, C.putih)}`;
-  const isi = `${kiri} ${cat("·", C.abu)} ${tengah} ${cat("·", C.abu)} ${kanan}`;
-  const garis = "─".repeat(Math.max(0, lebar - lebarTeks(isi) - 2));
-  console.log(cat("┌", C.abu) + isi + " " + garis + cat("┐", C.abu));
 }
 
 /* ------------------------------------------------------------ UI: banner, help, stats */
@@ -923,6 +993,52 @@ function pesanHTTP(status, detail) {
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
+/* ------------------------------------------------- memori persisten (Hermes Agent) */
+
+const MEMORY_FILE = path.join(CONFIG_DIR, "memory.json");
+
+async function muatMemori() {
+  try {
+    const data = await fs.readFile(MEMORY_FILE, "utf-8");
+    const json = JSON.parse(data);
+    return Array.isArray(json.fakta) ? json.fakta : [];
+  } catch {
+    return []; // file belum ada atau rusak → anggap kosong, jangan crash
+  }
+}
+
+async function tambahFakta(teks) {
+  const fakta = await muatMemori();
+  fakta.push({ teks, waktu: new Date().toISOString() });
+  await fs.mkdir(path.dirname(MEMORY_FILE), { recursive: true });
+  await fs.writeFile(MEMORY_FILE, JSON.stringify({ versi: 1, fakta }, null, 2), "utf-8");
+  return fakta;
+}
+
+// Bangun system prompt: identitas + mode agen + fakta memori
+async function bangunSistemPrompt() {
+  const daftarTool = MODE_AKTIF === "plan"
+    ? "read_file dan run_command (MODE PLAN: hanya baca; menulis file & perintah di luar whitelist akan diblokir sistem)"
+    : "read_file, write_file, edit_file, run_command";
+  let teks = `Kamu adalah asisten AI yang memiliki akses ke tool: ${daftarTool}. ` +
+    "GUNAKAN TOOL LANGSUNG tanpa menanyakan izin via teks. " +
+    "Jika user minta baca/tulis file atau jalankan perintah, PANGGIL TOOL LANGSUNG. " +
+    "Jangan tanya 'Apakah Anda mengizinkan?' via chat. " +
+    "Tool confirmation ditangani oleh sistem, bukan olehmu. " +
+    "Bahasa Indonesia.";
+  teks += `\n\nMODE AGEN SAAT INI: ${MODE_AKTIF === "plan" ? "PLAN" : "BUILD"}. ` +
+    (MODE_AKTIF === "plan"
+      ? "Di mode PLAN kamu HANYA boleh membaca (read_file) dan perintah shell read-only (ls, cat, pwd, git status, git diff, git log, node --version, dll). JANGAN mencoba menulis/mengedit file atau menjalankan perintah yang mengubah sistem — tool-nya tidak tersedia dan permintaan akan diblokir."
+      : "Di mode BUILD kamu boleh membaca, menulis, mengedit file, dan menjalankan perintah (dengan konfirmasi pengguna).");
+
+  const fakta = await muatMemori();
+  if (fakta.length > 0) {
+    teks += "\n\nFakta penting tentang user/konteks (gunakan sebagai konteks, jangan diucapkan ulang kecuali diminta):\n" +
+      fakta.map((f) => `- ${f.teks}`).join("\n");
+  }
+  return teks;
+}
+
 async function main() {
   // 1. Muat konfigurasi
   let config = await bacaConfig();
@@ -964,12 +1080,7 @@ async function main() {
   const riwayat = [
     {
       role: "system",
-      content: "Kamu adalah asisten AI yang memiliki akses ke tool: read_file, write_file, run_command. " +
-        "GUNAKAN TOOL LANGSUNG tanpa menanyakan izin via teks. " +
-        "Jika user minta baca/tulis file atau jalankan perintah, PANGGIL TOOL LANGSUNG. " +
-        "Jangan tanya 'Apakah Anda mengizinkan?' via chat. " +
-        "Tool confirmation ditangani oleh sistem, bukan olehmu. " +
-        "Bahasa Indonesia."
+      content: await bangunSistemPrompt(),
     }
   ];
   let keluar = false;
@@ -1000,8 +1111,46 @@ async function main() {
     if (teks === "/model") { console.log(); await handleModelCommand(rl, lebar); tanya(); continue; }
     if (teks === "/config") { console.log(); await handleConfigCommand(rl, lebar); tanya(); continue; }
     if (teks === "/tools") { console.log(); handleToolsCommand(lebar); tanya(); continue; }
+    if (teks === "/mode" || teks.startsWith("/mode ")) { console.log(); await handleModeCommand(teks, riwayat); tanya(); continue; }
+    if (teks === "/remember" || teks.startsWith("/remember ")) {
+      console.log();
+      const fakta = teks.slice("/remember".length).trim();
+      if (!fakta) {
+        console.log(cat("  ℹ️  Gunakan: /remember <fakta> — contoh: /remember Saya suka kopi dingin", C.kuning));
+      } else {
+        await tambahFakta(fakta);
+        riwayat[0].content = await bangunSistemPrompt();
+        const total = (await muatMemori()).length;
+        console.log(cat(`  🧠 Tersimpan ke memori: ${fakta}`, C.hijau));
+        console.log(cat(`     Total fakta: ${total} (lihat dengan /recall)`, C.abu));
+      }
+      console.log(); tanya(); continue;
+    }
+    if (teks === "/recall") {
+      console.log();
+      const fakta = await muatMemori();
+      if (fakta.length === 0) {
+        console.log(cat("  🧠 Belum ada fakta tersimpan. Tambah dengan: /remember <fakta>", C.kuning));
+      } else {
+        console.log(bingkaiAtas(`Memori (${fakta.length} fakta)`, lebar));
+        fakta.forEach((f, i) => {
+          const baris = `${i + 1}. ${f.teks}`;
+          for (const b of bungkus(baris, Math.max(20, lebar - 3))) {
+            console.log(cat("│ ", C.abu) + cat(b, C.putih) + " ".repeat(Math.max(1, lebar - 3 - lebarTeks(b))) + cat("│", C.abu));
+          }
+        });
+        console.log(bingkaiBawah(lebar));
+      }
+      console.log(); tanya(); continue;
+    }
     if (teks === "/clear") { handleClearCommand(); tanya(); continue; }
-    if (teks === "/reset") { riwayat.length = 0; SESI.tokenTotal = 0; SESI.pesanDikirim = 0; SESI.pesanDiterima = 0; console.log("  " + cat("Riwayat percakapan dikosongkan.", C.abu)); console.log(); tanya(); continue; }
+    if (teks === "/reset") {
+      riwayat.length = 0;
+      riwayat.push({ role: "system", content: await bangunSistemPrompt() }); // sistem prompt ikut dipulihkan
+      SESI.tokenTotal = 0; SESI.pesanDikirim = 0; SESI.pesanDiterima = 0;
+      console.log("  " + cat("Riwayat percakapan dikosongkan.", C.abu));
+      console.log(); tanya(); continue;
+    }
     if (teks === "/compact") {
       console.log();
       const spinner = mulaiSpinner("meminta ringkasan ke AI");
@@ -1009,6 +1158,7 @@ async function main() {
       spinner.berhenti();
       if (ringkasan) {
         riwayat.length = 0;
+        riwayat.push({ role: "system", content: await bangunSistemPrompt() }); // sistem prompt ikut dipulihkan
         riwayat.push({ role: "user", content: "[Ringkasan percakapan sebelumnya]" });
         riwayat.push({ role: "assistant", content: ringkasan });
         console.log("  " + cat("Percakapan diringkas:", C.hijau));
@@ -1067,4 +1217,4 @@ if (require.main === module) {
   main().catch((err) => { console.error("Terjadi kesalahan tak terduga:", err); process.exitCode = 1; });
 }
 
-module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel };
+module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, perintahPlanDiizinkan, toolsUntukMode, bangunSistemPrompt, muatMemori };

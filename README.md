@@ -13,7 +13,7 @@
 
 ---
 
-Omnitermux is a universal AI assistant that runs entirely in your terminal. It connects to **any OpenAI-compatible API** — direct providers (NVIDIA, OpenRouter, Groq, Google AI, OpenAI) or local gateways (OmniRoute, 9Router, LiteLLM) — and gives the model real abilities through **AI Skills (Tool Calling)**: read and write files, and safely run shell commands, all inside a sandboxed `workspace/` folder.
+Omnitermux is a universal AI assistant that runs entirely in your terminal. It connects to **any OpenAI-compatible API** — direct providers (NVIDIA, OpenRouter, Groq, Google AI, OpenAI) or local gateways (OmniRoute, 9Router, LiteLLM) — and gives the model real abilities through **AI Skills (Tool Calling)**: read, write, and *safely edit* files, and run shell commands, all inside a sandboxed `workspace/` folder. It also borrows the best ideas from famous agents: **agent modes** from OpenCode2, **persistent memory** from Hermes Agent, and **smart file editing** from Oh My Pi.
 
 Everything is written with **only Node.js built-in modules** — no `npm install`, no `node_modules`, no external dependencies.
 
@@ -24,7 +24,10 @@ Everything is written with **only Node.js built-in modules** — no `npm install
 ## ✨ Features
 
 - **🧭 Interactive Setup Wizard** — Guided first-run configuration with two connection modes: *Direct Provider* (API key straight to the vendor) or *Gateway / Proxy* (OmniRoute, 9Router, LiteLLM, ...).
-- **🤖 AI Skills (Tool Calling)** — Standard OpenAI Function Calling schema with three tools: `read_file`, `write_file`, `run_command` — plus a hardened sandbox and per-call user confirmation.
+- **🧭 Agent Modes** — Adopted from OpenCode2: `/mode plan` restricts the AI to **read-only** work (`read_file` + whitelisted commands like `ls`, `cat`, `git status`), while `/mode build` unlocks full capabilities. The active mode is always shown in the status bar as `[PLAN]` / `[BUILD]`.
+- **🧠 Persistent Memory** — Adopted from Hermes Agent: `/remember <fact>` stores facts in `~/.config/omnitermux/memory.json`, `/recall` lists them, and every fact is automatically injected into the AI's system prompt at session start.
+- **✂️ Smart File Editing** — Adopted from Oh My Pi: the `edit_file` tool performs targeted string replacement instead of rewriting whole files — safer and far more token-efficient.
+- **🤖 AI Skills (Tool Calling)** — Standard OpenAI Function Calling schema with four tools: `read_file`, `write_file`, `edit_file`, `run_command` — plus a hardened sandbox and per-call user confirmation.
 - **📑 Model Pagination** — Model lists are paged 20 at a time with `next` / `all` navigation, active-model highlighting, and selection by number or name.
 - **⌨️ Slash Commands** — `/model`, `/config`, `/tools`, `/clear`, `/help`, `/stats`, `/compact`, `/reset` — full runtime control without restarting.
 - **🎨 Polished Terminal UI** — Box-drawing frames, ANSI colors (auto-disabled when piped or via `NO_COLOR`), animated spinner, live status bar with model, token count, cost, and session duration.
@@ -149,25 +152,29 @@ Type these at the `USER >` prompt:
 | Command | Description |
 |---------|-------------|
 | `/help` | Show the help table with all available commands |
+| `/mode` | Show or switch agent mode: `/mode plan` (read-only) · `/mode build` (full) |
 | `/model` | Interactively browse & switch models (paginated, Direct Providers) |
 | `/config` | View current configuration; type `edit` to re-run the setup wizard |
 | `/tools` | List available AI Skills (tools) with usage examples |
+| `/remember <fact>` | Save a fact to persistent memory (e.g. `/remember I like dark coffee`) |
+| `/recall` | Display every fact stored in memory |
 | `/clear` | Clear the terminal screen |
 | `/stats` | Show session statistics (tokens, cost, duration, messages) |
 | `/compact` | Ask the AI to summarize the conversation to save context |
-| `/reset` | Wipe conversation history and reset session counters |
+| `/reset` | Wipe conversation history and reset session counters (system prompt is restored) |
 | `exit` | Quit (also `quit` / `/exit` / `Ctrl+C`) |
 
 ---
 
 ## 🤖 AI Skills (Tool Calling)
 
-Omnitermux exposes three tools to the model using the **standard OpenAI Function Calling JSON Schema**, so any compatible model can use them.
+Omnitermux exposes four tools to the model using the **standard OpenAI Function Calling JSON Schema**, so any compatible model can use them.
 
 | Tool | Description | Example call |
 |------|-------------|--------------|
 | `read_file` | Read a file inside the workspace | `read_file({ "path": "catatan.txt" })` |
-| `write_file` | Create or overwrite a file in the workspace | `write_file({ "path": "todo.txt", "content": "Beli kopi" })` |
+| `write_file` | Create or overwrite a file in the workspace | `write_file({ "path": "todo.txt", "content": "Buy coffee" })` |
+| `edit_file` | Replace one exact string in a file (must match exactly once) — safer & token-efficient | `edit_file({ "path": "todo.txt", "old_string": "coffee", "new_string": "tea" })` |
 | `run_command` | Run a shell command (max 10 seconds) | `run_command({ "command": "ls -la" })` |
 
 ### Security model
@@ -176,6 +183,7 @@ Safety is layered — the model never gets unchecked access to your device:
 
 | Layer | Mechanism |
 |-------|-----------|
+| **🧭 Plan mode** | In `/mode plan`, only `read_file` and whitelisted read-only commands (`ls`, `cat`, `pwd`, `git status`, `git diff`, `git log`, `node --version`, ...) are even *sent* to the model — and re-checked at execution time. `write_file` / `edit_file` and shell chaining (`;`, `&&`, `|`, `>`) are blocked outright. |
 | **📁 Sandbox** | All file paths resolve inside `workspace/`. Path traversal (`../`, absolute paths) is rejected with `Akses ditolak`. |
 | **🚫 Command blocklist** | Dangerous patterns are blocked: `rm -rf`, `mkfs`, `dd if=`, `reboot`, `shutdown`, `su`, `sudo`, `passwd`, `chmod 777`, `> /dev/`, fork bombs, and more. |
 | **⏱️ Timeout** | Every command is killed after **10 seconds**; command length is capped at 500 characters. |
@@ -251,7 +259,9 @@ omnitermux/
 ├── tools.js          # AI Skills: JSON Schema, sandbox, safety checks, dispatcher
 ├── workspace/        # Sandboxed folder for all file & command operations
 ├── package.json      # Metadata (zero runtime dependencies)
-└── ~/.config/omnitermux/config.json   # Your saved configuration
+└── ~/.config/omnitermux/
+    ├── config.json   # Your saved configuration
+    └── memory.json   # Persistent memory (facts saved with /remember)
 ```
 
 ---

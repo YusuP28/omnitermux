@@ -80,6 +80,32 @@ const daftarTools = [
   {
     type: "function",
     function: {
+      name: "edit_file",
+      description: "Mengganti sebagian teks di dalam file (lebih aman dan hemat token daripada menulis ulang seluruh file)",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Path relatif terhadap folder workspace (contoh: 'catatan.txt')",
+          },
+          old_string: {
+            type: "string",
+            description: "Teks persis yang akan diganti — harus muncul tepat SATU kali di dalam file",
+          },
+          new_string: {
+            type: "string",
+            description: "Teks pengganti untuk old_string",
+          },
+        },
+        required: ["path", "old_string", "new_string"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "run_command",
       description: "Menjalankan perintah terminal (hanya perintah aman, maksimal 10 detik)",
       parameters: {
@@ -144,6 +170,38 @@ async function _write_file({ path: relatif, content }) {
   return { ok: true, written: content.length };
 }
 
+async function _edit_file({ path: relatif, old_string, new_string }) {
+  const absolut = validasiPathWorkspace(relatif);
+
+  if (typeof old_string !== "string" || old_string === "") {
+    throw new Error("old_string wajib berisi teks yang tidak kosong");
+  }
+  if (typeof new_string !== "string") {
+    throw new Error("new_string wajib berupa string");
+  }
+
+  let isi;
+  try {
+    isi = await fs.readFile(absolut, "utf-8");
+  } catch (err) {
+    if (err.code === "ENOENT") throw new Error(`File tidak ditemukan: ${relatif}`);
+    throw new Error(`Gagal membaca file: ${err.message}`);
+  }
+
+  // Hitung kemunculan agar penggantian ambigu dicegah
+  const jumlah = isi.split(old_string).length - 1;
+  if (jumlah === 0) {
+    throw new Error(`old_string tidak ditemukan di dalam file: ${relatif}`);
+  }
+  if (jumlah > 1) {
+    throw new Error(`old_string muncul ${jumlah} kali di ${relatif}; buat lebih spesifik agar tepat satu kecocokan`);
+  }
+
+  const baru = isi.replace(old_string, new_string);
+  await fs.writeFile(absolut, baru, "utf-8");
+  return { ok: true, replaced: 1, written: baru.length };
+}
+
 function _run_command({ command }) {
   return new Promise((resolve, reject) => {
     try {
@@ -184,6 +242,8 @@ async function eksekusiTool(namaTool, argumen) {
       return await _read_file(argumen);
     case "write_file":
       return await _write_file(argumen);
+    case "edit_file":
+      return await _edit_file(argumen);
     case "run_command":
       return await _run_command(argumen);
     default:
@@ -214,6 +274,7 @@ module.exports = {
   // ekspor fungsi internal untuk testing
   _read_file,
   _write_file,
+  _edit_file,
   _run_command,
   validasiPathWorkspace,
   cekPerintahAman,
