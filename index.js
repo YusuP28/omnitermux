@@ -347,7 +347,8 @@ function cetakToolCall(namaTool, argumen) {
 }
 
 async function mintaKonfirmasi(namaTool, argumen) {
-  if (process.env.OMNITERMUX_AUTO_APPROVE === "1") return true;
+  const autoApprove = process.env.OMNITERMUX_AUTO_APPROVE === "1" || process.env.OMNIROUTE_AUTO_APPROVE === "1";
+  if (autoApprove) return true;
   const teks = cat("⚠️  ", C.kuning) + cat("Izinkan ", C.putih) + cat(namaTool, C.putih, C.tebal) + cat("?", C.putih);
   if (!stdout.isTTY) return false;
   return new Promise((resolve) => {
