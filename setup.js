@@ -41,40 +41,76 @@ async function ambilDaftarModel(providerKey, apiKey) {
   } catch (err) { throw new Error(`Gagal mengambil daftar model: ${err.message}`); }
 }
 
+const UKURAN_HALAMAN = 20;
+
 async function pilihModel(providerKey, apiKey, defaultModel) {
   console.log(`\nMengambil daftar model dari ${DIRECT_PROVIDERS[providerKey].nama}...`);
   try {
     const models = await ambilDaftarModel(providerKey, apiKey);
-    
+
     if (models.length === 0) {
       console.log("  Tidak ada model yang ditemukan, gunakan default.");
       return defaultModel;
     }
 
-    const tampilkan = models.slice(0, 20);
-    console.log("\nModel tersedia:");
-    tampilkan.forEach((m, i) => {
-      const mark = m === defaultModel ? " (default)" : "";
-      console.log(`  ${i + 1}. ${m}${mark}`);
-    });
-    if (models.length > 20) console.log(`  ... dan ${models.length - 20} model lainnya`);
+    let offset = 0;
+    let tampilSemua = models.length <= UKURAN_HALAMAN;
+
+    const tampilkanDaftar = () => {
+      if (tampilSemua) {
+        console.log(`\nSemua model (${models.length}):`);
+      } else {
+        const akhir = Math.min(offset + UKURAN_HALAMAN, models.length);
+        const halaman = Math.floor(offset / UKURAN_HALAMAN) + 1;
+        console.log(`\nModel ${offset + 1}-${akhir} dari ${models.length} (halaman ${halaman}):`);
+      }
+      const bagian = tampilSemua ? models : models.slice(offset, offset + UKURAN_HALAMAN);
+      bagian.forEach((m, i) => {
+        const nomor = (tampilSemua ? i : offset + i) + 1;
+        const mark = m === defaultModel ? " (default)" : "";
+        console.log(`  ${nomor}. ${m}${mark}`);
+      });
+      if (!tampilSemua && models.length > UKURAN_HALAMAN) {
+        console.log("  Ketik 'next' untuk 20 berikutnya, atau 'all' untuk semua model.");
+      }
+    };
+
+    tampilkanDaftar();
 
     while (true) {
-      const input = await tanya(`\nPilih model (nomor 1-${tampilkan.length}, atau ketik nama model, atau Enter untuk [${SAFE_FALLBACK_MODEL}])`, "");
-      
-      // Jika user menekan Enter tanpa input
+      const hint = tampilSemua || models.length <= UKURAN_HALAMAN
+        ? `nomor 1-${models.length} atau nama model`
+        : `nomor 1-${models.length}, 'next', 'all', atau nama model`;
+      const input = await tanya(`\nPilih model (${hint}, atau Enter untuk [${SAFE_FALLBACK_MODEL}])`, "");
+
       if (input === "") {
         console.log(`  Menggunakan model aman: ${SAFE_FALLBACK_MODEL}`);
         return SAFE_FALLBACK_MODEL;
       }
-      
+
+      const kecil = input.toLowerCase();
+      if (kecil === "next") {
+        if (tampilSemua) console.log("  Semua model sudah ditampilkan.");
+        else if (offset + UKURAN_HALAMAN >= models.length) console.log("  Sudah di halaman terakhir.");
+        else { offset += UKURAN_HALAMAN; tampilkanDaftar(); }
+        continue;
+      }
+      if (kecil === "all") {
+        if (tampilSemua) console.log("  Semua model sudah ditampilkan.");
+        else { offset = 0; tampilSemua = true; tampilkanDaftar(); }
+        continue;
+      }
+
       const num = parseInt(input, 10);
-      if (!isNaN(num) && num >= 1 && num <= tampilkan.length) return tampilkan[num - 1];
-      
+      if (!isNaN(num) && num >= 1 && num <= models.length) return models[num - 1];
+
       if (input && models.includes(input)) return input;
-      
-      if (input) { const confirm = await tanyaYesNo(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false); if (confirm) return input; }
-      
+
+      if (input) {
+        const confirm = await tanyaYesNo(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false);
+        if (confirm) return input;
+      }
+
       console.log("  Input tidak valid. Coba lagi.");
     }
   } catch (err) { console.log(`  ⚠️  ${err.message}`); console.log("  Fallback ke input manual."); return await tanya(`Model default`, defaultModel); }

@@ -480,8 +480,6 @@ async function kirimPesanDenganTool(riwayat, rl, lebar) {
 
 /* ------------------------------------------------------------ Model Management */
 
-const SAFE_FALLBACK_MODEL = "meta/llama-3.1-70b-instruct";
-
 async function ambilDaftarModelDariAPI(providerKey, apiKey, baseUrl) {
   const provider = DIRECT_PROVIDERS[providerKey];
   if (!provider?.modelsEndpoint) {
@@ -540,60 +538,9 @@ async function ambilDaftarModelDariAPI(providerKey, apiKey, baseUrl) {
   }
 }
 
-async function pilihModelInteraktif(providerKey, apiKey, defaultModel) {
-  const provider = DIRECT_PROVIDERS[providerKey];
-  console.log(`\nMengambil daftar model dari ${provider.nama}...`);
-  
-  try {
-    const models = await ambilDaftarModelDariAPI(providerKey, apiKey, BASE_URL);
-    
-    if (models.length === 0) {
-      console.log("  Tidak ada model yang ditemukan, gunakan default.");
-      return defaultModel;
-    }
-
-    const tampilkan = models.slice(0, 20);
-    console.log("\nModel tersedia:");
-    tampilkan.forEach((m, i) => {
-      const mark = m === MODEL ? " " + cat("(aktif)", C.hijau) : "";
-      console.log(`  ${cat(String(i + 1).padStart(2), C.kuning)}. ${m}${mark}`);
-    });
-    if (models.length > 20) {
-      console.log(cat(`  ... dan ${models.length - 20} model lainnya`, C.abu));
-    }
-
-    while (true) {
-      const input = await tanyaRL(`\nPilih model (nomor 1-${tampilkan.length}, atau ketik nama model)`, "");
-      
-      if (input === "") {
-        console.log(cat(`  Melewatkan perubahan. Model tetap: ${MODEL}`, C.abu));
-        return MODEL;
-      }
-      
-      const num = parseInt(input, 10);
-      if (!isNaN(num) && num >= 1 && num <= tampilkan.length) {
-        return tampilkan[num - 1];
-      }
-      
-      if (input && models.includes(input)) {
-        return input;
-      }
-      
-      if (input) {
-        const confirm = await tanyaYesNoRL(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false);
-        if (confirm) return input;
-      }
-      
-      console.log("  Input tidak valid. Coba lagi.");
-    }
-  } catch (err) {
-    console.log(`  ⚠️  ${err.message}`);
-    console.log("  Fallback ke input manual.");
-    return await tanyaRL(`Model default`, MODEL);
-  }
-}
-
 /* ------------------------------------------------------------ Slash Commands */
+
+const UKURAN_HALAMAN = 20;
 
 async function handleModelCommand(rl, lebar) {
   if (!PROVIDER_KEY || !DIRECT_PROVIDERS[PROVIDER_KEY]?.modelsEndpoint) {
@@ -603,56 +550,110 @@ async function handleModelCommand(rl, lebar) {
 
   const provider = DIRECT_PROVIDERS[PROVIDER_KEY];
   console.log(cat(`\n🔄 Mengambil daftar model dari ${provider.nama}...`, C.sian));
-  
+
+  let models;
   try {
-    const models = await ambilDaftarModelDariAPI(PROVIDER_KEY, API_KEY, BASE_URL);
-    
-    if (models.length === 0) {
-      console.log(cat("  Tidak ada model yang ditemukan.", C.kuning));
-      return;
-    }
+    models = await ambilDaftarModelDariAPI(PROVIDER_KEY, API_KEY, BASE_URL);
+  } catch (err) {
+    console.log(cat(`\n❌ Gagal mengambil daftar model: ${err.message}`, C.merah));
+    return;
+  }
 
-    const tampilkan = models.slice(0, 20);
-    console.log(cat("\n📋 Model tersedia:", C.putih, C.tebal));
-    models.slice(0, 20).forEach((m, i) => {
+  if (models.length === 0) {
+    console.log(cat("  Tidak ada model yang ditemukan.", C.kuning));
+    return;
+  }
+
+  let offset = 0;
+  let tampilSemua = models.length <= UKURAN_HALAMAN;
+
+  const tampilkanDaftar = () => {
+    if (tampilSemua) {
+      console.log(cat(`\n📋 Semua model (${models.length}):`, C.putih, C.tebal));
+    } else {
+      const akhir = Math.min(offset + UKURAN_HALAMAN, models.length);
+      const halaman = Math.floor(offset / UKURAN_HALAMAN) + 1;
+      console.log(cat(`\n📋 Model ${offset + 1}–${akhir} dari ${models.length} (halaman ${halaman}):`, C.putih, C.tebal));
+    }
+    const bagian = tampilSemua ? models : models.slice(offset, offset + UKURAN_HALAMAN);
+    bagian.forEach((m, i) => {
+      const nomor = (tampilSemua ? i : offset + i) + 1;
       const mark = m === MODEL ? " " + cat("(aktif)", C.hijau) : "";
-      console.log(`  ${cat(String(i + 1).padStart(2), C.kuning)}. ${m}${mark}`);
+      console.log(`  ${cat(String(nomor).padStart(3), C.kuning)}. ${m}${mark}`);
     });
-    if (models.length > 20) {
-      console.log(cat(`  ... dan ${models.length - 20} model lainnya`, C.abu));
+    if (!tampilSemua && models.length > UKURAN_HALAMAN) {
+      console.log(cat("  Ketik 'next' untuk 20 berikutnya, atau 'all' untuk semua model.", C.abu));
     }
+  };
 
-    const input = await tanyaRL(`\nPilih model (nomor 1-${Math.min(20, models.length)}, atau ketik nama model)`, "");
-    
-    if (input === "") {
+  tampilkanDaftar();
+
+  for (;;) {
+    const hint = tampilSemua || models.length <= UKURAN_HALAMAN
+      ? `nomor 1-${models.length} atau nama model`
+      : `nomor 1-${models.length}, 'next', 'all', atau nama model`;
+    const input = await tanyaRL(rl, `\nPilih model (${hint})`, "");
+    const teks = input.trim();
+
+    if (teks === "") {
       console.log(cat(`  Melewatkan perubahan. Model tetap: ${MODEL}`, C.abu));
       return;
     }
-    
-    const num = parseInt(input, 10);
-    let modelBaru;
-    if (!isNaN(num) && num >= 1 && num <= Math.min(20, models.length)) {
-      modelBaru = models[num - 1];
-    } else if (input && models.includes(input)) {
-      modelBaru = input;
-    } else if (input) {
-      const confirm = await tanyaYesNoRL(`Model "${input}" tidak dalam daftar. Tetap gunakan?`, false);
-      if (confirm) modelBaru = input;
-    }
-    
-    if (modelBaru && modelBaru !== MODEL) {
-      // Update config file
-      const config = await bacaConfig();
-      if (config) {
-        config.model = modelBaru;
-        await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+
+    const kecil = teks.toLowerCase();
+    if (kecil === "next") {
+      if (tampilSemua) {
+        console.log(cat("  Semua model sudah ditampilkan.", C.abu));
+      } else if (offset + UKURAN_HALAMAN >= models.length) {
+        console.log(cat("  Sudah di halaman terakhir.", C.abu));
+      } else {
+        offset += UKURAN_HALAMAN;
+        tampilkanDaftar();
       }
-      MODEL = modelBaru;
-      SESI.modelAktif = MODEL;
-      console.log(cat(`\n✅ Model berhasil diubah menjadi: ${modelBaru}`, C.hijau, C.tebal));
+      continue;
     }
-  } catch (err) {
-    console.log(cat(`\n❌ Gagal mengambil daftar model: ${err.message}`, C.merah));
+    if (kecil === "all") {
+      if (tampilSemua) {
+        console.log(cat("  Semua model sudah ditampilkan.", C.abu));
+      } else {
+        offset = 0;
+        tampilSemua = true;
+        tampilkanDaftar();
+      }
+      continue;
+    }
+
+    let modelBaru = null;
+    const num = parseInt(teks, 10);
+    if (!Number.isNaN(num) && num >= 1 && num <= models.length) {
+      modelBaru = models[num - 1];
+    } else if (models.includes(teks)) {
+      modelBaru = teks;
+    } else {
+      const setuju = await tanyaYesNoRL(rl, `Model "${teks}" tidak dalam daftar. Tetap gunakan?`, false);
+      if (setuju) modelBaru = teks;
+      else console.log(cat("  Input tidak valid. Coba lagi.", C.abu));
+    }
+
+    if (modelBaru) {
+      if (modelBaru === MODEL) {
+        console.log(cat(`  Model sudah aktif: ${MODEL}`, C.abu));
+        return;
+      }
+      try {
+        const config = await bacaConfig();
+        if (config) {
+          config.model = modelBaru;
+          await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+        }
+        MODEL = modelBaru;
+        SESI.modelAktif = MODEL;
+        console.log(cat(`\n✅ Model berhasil diubah menjadi: ${modelBaru}`, C.hijau, C.tebal));
+      } catch (err) {
+        console.log(cat(`\n❌ Gagal menyimpan konfigurasi: ${err.message}`, C.merah));
+      }
+      return;
+    }
   }
 }
 
@@ -687,7 +688,7 @@ async function handleConfigCommand(rl, lebar) {
   console.log(cat("└" + "─".repeat(Math.max(0, lebar - 2)) + "┘", C.abu));
   console.log();
 
-  const action = await tanyaRL(`Ketik 'edit' untuk mengubah konfigurasi (menjalankan setup ulang), atau tekan Enter untuk kembali: `, "");
+  const action = await tanyaRL(rl, `Ketik 'edit' untuk mengubah konfigurasi (menjalankan setup ulang), atau tekan Enter untuk kembali: `, "");
   
   if (action.trim().toLowerCase() === "edit") {
     console.log();
@@ -765,27 +766,35 @@ function handleModelNotFoundError(modelName) {
 
 /* ------------------------------------------------------------ Readline helpers untuk slash commands */
 
-function tanyaRL(pertanyaan, defaultVal = "") {
+function tanyaRL(rl, pertanyaan, defaultVal = "") {
   return new Promise((resolve) => {
     if (!stdout.isTTY) { resolve(defaultVal); return; }
-    const rl = readline.createInterface({ input: stdin, output: stdout, terminal: true });
     const prompt = defaultVal ? `${pertanyaan} [${defaultVal}]: ` : `${pertanyaan}: `;
-    rl.question(prompt, (input) => {
-      rl.close();
-      resolve(input.trim() || defaultVal);
-    });
+    try {
+      rl.question(prompt, (input) => {
+        resolve((input || "").trim() || defaultVal);
+      });
+    } catch (err) {
+      if (err && err.code === "ERR_USE_AFTER_CLOSE") resolve(defaultVal);
+      else throw err;
+    }
   });
 }
 
-function tanyaYesNoRL(pertanyaan, defaultYes = true) {
+function tanyaYesNoRL(rl, pertanyaan, defaultYes = true) {
   return new Promise((resolve) => {
     if (!stdout.isTTY) { resolve(defaultYes); return; }
-    const rl = readline.createInterface({ input: stdin, output: stdout, terminal: true });
     const hint = defaultYes ? "Y/n" : "y/N";
-    rl.question(`${pertanyaan} [${hint}]: `, (jawab) => {
-      rl.close();
-      resolve(jawab.trim().toLowerCase() === "y" || jawab.trim().toLowerCase() === "yes");
-    });
+    try {
+      rl.question(`${pertanyaan} [${hint}]: `, (jawab) => {
+        const t = (jawab || "").trim().toLowerCase();
+        if (t === "") resolve(defaultYes);
+        else resolve(t === "y" || t === "yes");
+      });
+    } catch (err) {
+      if (err && err.code === "ERR_USE_AFTER_CLOSE") resolve(defaultYes);
+      else throw err;
+    }
   });
 }
 
