@@ -49,23 +49,68 @@ function cat(teks, ...kode) {
 
 /* ------------------------------------------------------------ tata letak */
 
+/**
+ * Lebar tampilan sebuah teks: kode ANSI diabaikan, karakter lebar (CJK,
+ * emoji) dihitung 2 kolom. Tanpa ini, padding sel tabel akan meleset.
+ */
+function lebarTeks(teks) {
+  let lebar = 0;
+
+  for (const karakter of String(teks).replace(/\x1b\[[0-9;]*m/g, "")) {
+    const kode = karakter.codePointAt(0);
+    const lebarDua =
+      (kode >= 0x1100 && kode <= 0x115f) ||
+      kode === 0x2329 ||
+      kode === 0x232a ||
+      (kode >= 0x2e80 && kode <= 0xa4cf) ||
+      (kode >= 0xac00 && kode <= 0xd7a3) ||
+      (kode >= 0xf900 && kode <= 0xfaff) ||
+      (kode >= 0xfe30 && kode <= 0xfe6f) ||
+      (kode >= 0xff00 && kode <= 0xff60) ||
+      (kode >= 0xffe0 && kode <= 0xffe6) ||
+      (kode >= 0x1f300 && kode <= 0x1f64f) ||
+      (kode >= 0x1f680 && kode <= 0x1f6ff) ||
+      (kode >= 0x1f900 && kode <= 0x1f9ff) ||
+      (kode >= 0x2600 && kode <= 0x27bf);
+
+    lebar += lebarDua ? 2 : 1;
+  }
+
+  return lebar;
+}
+
+function potongTeks(teks, batas) {
+  const hasil = [];
+  let dipakai = 0;
+
+  for (const karakter of String(teks)) {
+    const lebar = lebarTeks(karakter);
+    if (dipakai + lebar > batas) break;
+    hasil.push(karakter);
+    dipakai += lebar;
+  }
+
+  return hasil;
+}
+
 function lebarTampilan() {
   const paksa = Number(process.env.OMNITERMUX_LEBAR);
   if (Number.isFinite(paksa) && paksa > 0) {
     return Math.min(LEBAR_MAKS, Math.max(LEBAR_MIN, Math.floor(paksa)));
   }
-  const kolom = stdout.columns || 0;
+  const kolom = stdout.columns || Number(process.env.COLUMNS) || 0;
   const dasar = kolom > 0 ? kolom - 2 : 70;
   return Math.min(LEBAR_MAKS, Math.max(LEBAR_MIN, dasar));
 }
 
 /**
- * Bungkus teks per kata agar tidak melewati `lebar` kolom.
+ * Bungkus teks per kata agar tidak melewati `lebar` kolom tampilan.
  * Indentasi awal dipertahankan, dan lanjutan butir daftar ("- ", "1. ")
  * ikut menjorok supaya rapi.
  */
 function bungkus(teks, lebar) {
   const hasil = [];
+  const batasTotal = Math.max(1, Math.floor(lebar));
 
   for (const mentahAsli of String(teks).replace(/\t/g, "  ").split("\n")) {
     const mentah = mentahAsli.replace(/\s+$/, "");
@@ -78,19 +123,31 @@ function bungkus(teks, lebar) {
     const butir = /^\s*(?:[-*+]|\d+[.)])\s+/.test(mentah);
     const lanjut = menjorok + (butir ? "  " : "");
 
-    let sisa = mentah.slice(menjorok.length);
+    let sisa = Array.from(mentah.slice(menjorok.length));
     let awalan = menjorok;
 
     for (;;) {
-      const lebarBaris = Math.max(10, lebar - awalan.length);
-      if (sisa.length <= lebarBaris) {
-        hasil.push(awalan + sisa);
+      const batas = Math.max(1, batasTotal - lebarTeks(awalan));
+      const potongMuat = potongTeks(sisa, batas);
+
+      if (potongMuat.length >= sisa.length) {
+        hasil.push(awalan + sisa.join(""));
         break;
       }
-      let potong = sisa.lastIndexOf(" ", lebarBaris);
-      if (potong <= 0) potong = lebarBaris; // kata terlalu panjang: potong paksa
-      hasil.push(awalan + sisa.slice(0, potong));
-      sisa = sisa.slice(potong).replace(/^\s+/, "");
+
+      // usahakan memotong di spasi terakhir agar kata tidak terbelah
+      let potong = potongMuat.length;
+      for (let i = potong; i > 0; i -= 1) {
+        if (sisa[i] === " ") {
+          potong = i;
+          break;
+        }
+      }
+      if (potong <= 0) potong = Math.max(1, potongMuat.length);
+
+      hasil.push(awalan + sisa.slice(0, potong).join(""));
+      sisa = sisa.slice(potong);
+      while (sisa.length > 0 && sisa[0] === " ") sisa.shift();
       awalan = lanjut;
     }
   }
@@ -106,11 +163,25 @@ function formatBaris(baris) {
 }
 
 function apakahTabel(baris) {
-  return /^\s*\|.*\|\s*$/.test(baris);
+  const teks = baris.trim();
+  // cukup diawali "|" dan punya minimal satu "|" lagi, supaya baris tanpa
+  // "|" di akhir (sering dihasilkan model) tetap dikenali sebagai tabel
+  return teks.startsWith("|") && (teks.match(/\|/g) || []).length >= 2;
+}
+
+/** Pecah satu baris tabel menjadi sel, aman terhadap "\|" di dalam sel. */
+function pecahSel(baris) {
+  let teks = baris.trim();
+  if (teks.startsWith("|")) teks = teks.slice(1);
+  if (teks.endsWith("|") && !teks.endsWith("\\|")) teks = teks.slice(0, -1);
+  return teks.split(/(?<!\\)\|/).map((isi) => isi.replace(/\\\|/g, "|").trim());
 }
 
 function apakahPemisah(baris) {
-  return /^\s*\|[\s:|-]+\|\s*$/.test(baris) && baris.includes("-");
+  const sel = pecahSel(baris);
+  const adaGaris = sel.some((isi) => /^:?-{1,}:?$/.test(isi));
+  const semuaGaris = sel.every((isi) => isi === "" || /^:?-{1,}:?$/.test(isi));
+  return adaGaris && semuaGaris;
 }
 
 /**
@@ -138,23 +209,34 @@ function tabelVertikal(sel, pemisah, lebar) {
 }
 
 /**
- * Rapikan tabel markdown agar muat di lebar layar: lebar kolom dikecilkan
- * proporsional dan isi sel dibungkus, bukan barisnya dipotong.
+ * Rapikan tabel markdown agar selalu muat: lebar kolom dikecilkan, isi sel
+ * dibungkus TEPAT selebar kolomnya, lalu dipad berdasarkan lebar tampilan
+ * (bukan jumlah karakter) supaya garis "|" tetap sejajar.
  */
+function pad(teks, lebar) {
+  const sisa = lebar - lebarTeks(teks);
+  return sisa > 0 ? teks + " ".repeat(sisa) : teks;
+}
+
+/** Jaring pengaman terakhir: potong dengan elipsis bila masih kelebihan. */
+function potongElipsis(teks, lebar) {
+  if (lebarTeks(teks) <= lebar) return teks;
+  return potongTeks(teks, Math.max(0, lebar - 1)).join("") + "…";
+}
+
 function formatTabel(blok, lebar) {
-  const sel = blok.map((baris) =>
-    baris
-      .trim()
-      .replace(/^\|/, "")
-      .replace(/\|$/, "")
-      .split("|")
-      .map((isi) => isi.trim())
-  );
+  const sel = blok.map(pecahSel);
   const pemisah = blok.map(apakahPemisah);
+  const barisData = sel.filter((_, i) => !pemisah[i]);
   const jumlahKolom = Math.max(1, ...sel.map((r) => r.length));
 
+  // samakan jumlah sel tiap baris agar tidak ada indeks yang hilang
+  for (const baris of sel) {
+    while (baris.length < jumlahKolom) baris.push("");
+  }
+
   const lebarAlami = Array.from({ length: jumlahKolom }, (_, j) =>
-    Math.max(3, ...sel.filter((_, i) => !pemisah[i]).map((r) => (r[j] || "").length))
+    Math.max(3, ...barisData.map((r) => lebarTeks(r[j] || "")))
   );
   const lebarKolom = [...lebarAlami];
 
@@ -164,33 +246,34 @@ function formatTabel(blok, lebar) {
   let iterasi = 0;
 
   // kecilkan kolom terlebar terus-menerus sampai muat
-  while (total > tersedia && Math.min(...lebarKolom) > MIN_KOLOM && iterasi < 2000) {
+  while (total > tersedia && Math.min(...lebarKolom) > MIN_KOLOM && iterasi < 4000) {
     const palingLebar = lebarKolom.indexOf(Math.max(...lebarKolom));
     lebarKolom[palingLebar] -= 1;
     total -= 1;
     iterasi += 1;
   }
 
-  // masih tidak muat meski sudah minimum: pakai tampilan vertikal
-  const adaData = sel.filter((_, i) => !pemisah[i]).length > 1;
-  if (total > tersedia && adaData) {
+  // masih tidak muat (umumnya >3 kolom di layar sempit): format vertikal
+  if (total > tersedia && barisData.length > 1) {
     return tabelVertikal(sel, pemisah, lebar);
   }
 
+  const garis = "|" + lebarKolom.map((w) => "-".repeat(w + 2)).join("|") + "|";
   const hasil = [];
 
   sel.forEach((barisSel, i) => {
     if (pemisah[i]) {
-      hasil.push("|" + lebarKolom.map((w) => "-".repeat(w + 2)).join("|") + "|");
+      hasil.push(garis);
       return;
     }
 
-    const terbungkus = lebarKolom.map((w, j) => bungkus(barisSel[j] || "", Math.max(5, w)));
+    // bungkus isi sel tepat selebar kolomnya — tanpa batas minimum tambahan
+    const terbungkus = lebarKolom.map((w, j) => bungkus(barisSel[j] || "", w));
     const tinggi = Math.max(1, ...terbungkus.map((k) => k.length));
 
-    for (let k = 0; k < tinggi; k++) {
-      const isi = lebarKolom
-        .map((w, j) => (terbungkus[j][k] || "").padEnd(w))
+    for (let k = 0; k < tinggi; k += 1) {
+      const isi = terbungkus
+        .map((kumpulan, j) => pad(potongElipsis(kumpulan[k] || "", lebarKolom[j]), lebarKolom[j]))
         .join(" | ");
       hasil.push("| " + isi + " |");
     }
@@ -514,9 +597,20 @@ async function main() {
   console.log();
 }
 
-main().catch((err) => {
-  console.error("Terjadi kesalahan tak terduga:", err);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Terjadi kesalahan tak terduga:", err);
+    process.exitCode = 1;
+  });
+}
 
-module.exports = { kirimPesan, pesanHTTP, pesanJaringan, bungkus, lebarTampilan };
+module.exports = {
+  kirimPesan,
+  pesanHTTP,
+  pesanJaringan,
+  bungkus,
+  lebarTampilan,
+  lebarTeks,
+  siapkanIsi,
+  formatTabel,
+};
