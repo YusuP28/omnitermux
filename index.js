@@ -523,7 +523,7 @@ async function main() {
     }
   };
 
-  rl.setPrompt("  " + cat("Anda", C.hijau, C.tebal) + cat(" > ", C.abu));
+  rl.setPrompt("  " + cat("USER", C.hijau, C.tebal) + cat(" > ", C.abu));
   tanya();
 
   // Async iterator supaya tidak ada baris yang terlewat
