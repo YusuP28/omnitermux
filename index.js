@@ -162,6 +162,13 @@ function formatBaris(baris) {
     .replace(/`([^`]+)`/g, (_m, isi) => `${C.sian}${isi}${C.putih}`);
 }
 
+/** Konversi tag <br> dan <br/> ke newline, lalu hapus spasi berlebih. */
+function bersihkanTeks(teks) {
+  return String(teks)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/[ \t]+$/gm, "");
+}
+
 function apakahTabel(baris) {
   const teks = baris.trim();
   // cukup diawali "|" dan punya minimal satu "|" lagi, supaya baris tanpa
@@ -198,7 +205,8 @@ function tabelVertikal(sel, pemisah, lebar) {
     baris.forEach((nilai, j) => {
       if (nilai === "") return;
       const label = judul[j] || `Kolom ${j + 1}`;
-      for (const potong of bungkus(`${label}: ${nilai}`, Math.max(20, lebar - 2))) {
+      const teks = formatBaris(`${label}: ${nilai}`);
+      for (const potong of bungkus(teks, Math.max(20, lebar - 2))) {
         hasil.push("  " + potong);
       }
     });
@@ -273,7 +281,10 @@ function formatTabel(blok, lebar) {
 
     for (let k = 0; k < tinggi; k += 1) {
       const isi = terbungkus
-        .map((kumpulan, j) => pad(potongElipsis(kumpulan[k] || "", lebarKolom[j]), lebarKolom[j]))
+        .map((kumpulan, j) => {
+          const teks = formatBaris(kumpulan[k] || "");
+          return pad(potongElipsis(teks, lebarKolom[j]), lebarKolom[j]);
+        })
         .join(" | ");
       hasil.push("| " + isi + " |");
     }
@@ -284,7 +295,10 @@ function formatTabel(blok, lebar) {
 
 /** Susun badan balasan: tabel dirapikan, teks biasa dibungkus. */
 function siapkanIsi(teks, lebar) {
-  const barisMentah = String(teks)
+  // pra-proses: <br> -> newline
+  teks = bersihkanTeks(teks);
+
+  const barisMentah = teks
     .replace(/\t/g, "  ")
     .split("\n")
     .map((baris) => baris.replace(/\s+$/, ""));
