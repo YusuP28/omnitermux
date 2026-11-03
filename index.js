@@ -496,7 +496,7 @@ async function kirimPesanDenganTool(riwayat, rl, lebar) {
       res = await fetch(`${BASE_URL}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-        body: JSON.stringify({ model: MODEL, messages: susunPesanDenganSkill(riwayat), tools: toolsUntukMode(), tool_choice: "auto", stream: false }),
+        body: JSON.stringify({ model: MODEL, messages: await susunPesanKeAPI(riwayat), tools: toolsUntukMode(), tool_choice: "auto", stream: false }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
@@ -786,7 +786,7 @@ function handleToolsCommand(lebar) {
   console.log();
 }
 
-async function handleModeCommand(teks, riwayat) {
+async function handleModeCommand(teks) {
   const arg = teks.split(/\s+/).slice(1).join(" ").toLowerCase();
 
   if (arg === "build" || arg === "plan") {
@@ -795,7 +795,6 @@ async function handleModeCommand(teks, riwayat) {
       return;
     }
     MODE_AKTIF = arg;
-    riwayat[0].content = await bangunSistemPrompt(); // segarkan konteks AI
     if (MODE_AKTIF === "plan") {
       console.log(cat("\n✅ Mode aktif: PLAN", C.kuning, C.tebal));
       console.log(cat("   AI hanya boleh membaca (read_file) dan perintah aman (ls, cat, git status, ...).", C.abu));
@@ -860,6 +859,43 @@ async function handleSkillsCommand(lebar) {
   console.log(cat(`  Aktifkan: ${SKILL_TERSEDIA.map((s) => "/" + s).join(", ")} · /clear-skill untuk mematikan`, C.abu));
 }
 
+async function handleSoulCommand(arg, lebar) {
+  if (arg === "edit") {
+    console.log(cat(`\n  Membuka nano: ${SOUL_FILE}`, C.abu));
+    const sukses = await new Promise((resolve) => {
+      const anak = spawn("nano", [SOUL_FILE], { stdio: "inherit" });
+      anak.on("error", (err) => {
+        console.log(cat(`  ✖ Gagal membuka nano: ${err.message}`, C.merah));
+        console.log(cat(`    Edit manual dengan editor lain: ${SOUL_FILE}`, C.kuning));
+        resolve(false);
+      });
+      anak.on("exit", () => resolve(true));
+    });
+    if (sukses) {
+      await muatSOUL();
+      console.log(cat("  ✅ SOUL dimuat ulang — kepribadian baru aktif untuk pesan berikutnya.", C.hijau));
+    }
+    return;
+  }
+
+  // Tampilkan isi SOUL.md (dibaca segar dari disk)
+  let isi = "";
+  try { isi = await fs.readFile(SOUL_FILE, "utf-8"); } catch { isi = SOUL_TEKS; }
+  console.log();
+  console.log(bingkaiAtas("SOUL — Identitas & Kepribadian", lebar));
+  for (const baris of siapkanIsi(isi.trim() || "(file kosong)", Math.max(20, lebar - 4))) {
+    if (baris === "") console.log(cat("│", C.abu));
+    else {
+      console.log(
+        cat("│ ", C.abu) + cat(baris, C.putih) +
+        " ".repeat(Math.max(1, lebar - 3 - lebarTeks(baris))) + cat("│", C.abu)
+      );
+    }
+  }
+  console.log(bingkaiBawah(lebar));
+  console.log(cat(`  Ubah dengan /soul edit (nano) · file: ${SOUL_FILE}`, C.abu));
+}
+
 function handleClearCommand() {
   // ANSI escape code untuk clear screen
   process.stdout.write("\x1b[2J\x1b[0f");
@@ -882,6 +918,7 @@ async function handleHelpCommand(lebar) {
       ["/tools", "Lihat daftar AI Skills (tools) yang tersedia"],
       ["/remember", "Simpan fakta ke memori persisten (/remember <fakta>)"],
       ["/recall", "Tampilkan semua fakta yang tersimpan di memori"],
+      ["/soul", "Lihat identitas AI (SOUL.md); /soul edit untuk mengubah via nano"],
       ["/help", "Tampilkan bantuan ini"],
     ],
     "Agent Skills": [
@@ -994,7 +1031,7 @@ async function mintaRingkasan(riwayat) {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify({ model: MODEL, messages: [...riwayat, { role: "user", content: prompt }], stream: false, max_tokens: 500 }),
+      body: JSON.stringify({ model: MODEL, messages: [...(await susunPesanKeAPI(riwayat)), { role: "user", content: prompt }], stream: false, max_tokens: 500 }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -1049,6 +1086,7 @@ function pesanHTTP(status, detail) {
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 
 /* ------------------------------------------------- memori persisten (Hermes Agent) */
 
@@ -1072,28 +1110,89 @@ async function tambahFakta(teks) {
   return fakta;
 }
 
-// Bangun system prompt: identitas + mode agen + fakta memori
-async function bangunSistemPrompt() {
-  const daftarTool = MODE_AKTIF === "plan"
-    ? "read_file dan run_command (MODE PLAN: hanya baca; menulis file & perintah di luar whitelist akan diblokir sistem)"
-    : "read_file, write_file, edit_file, run_command";
-  let teks = `Kamu adalah asisten AI yang memiliki akses ke tool: ${daftarTool}. ` +
-    "GUNAKAN TOOL LANGSUNG tanpa menanyakan izin via teks. " +
-    "Jika user minta baca/tulis file atau jalankan perintah, PANGGIL TOOL LANGSUNG. " +
-    "Jangan tanya 'Apakah Anda mengizinkan?' via chat. " +
-    "Tool confirmation ditangani oleh sistem, bukan olehmu. " +
-    "Bahasa Indonesia.";
-  teks += `\n\nMODE AGEN SAAT INI: ${MODE_AKTIF === "plan" ? "PLAN" : "BUILD"}. ` +
-    (MODE_AKTIF === "plan"
-      ? "Di mode PLAN kamu HANYA boleh membaca (read_file) dan perintah shell read-only (ls, cat, pwd, git status, git diff, git log, node --version, dll). JANGAN mencoba menulis/mengedit file atau menjalankan perintah yang mengubah sistem — tool-nya tidak tersedia dan permintaan akan diblokir."
-      : "Di mode BUILD kamu boleh membaca, menulis, mengedit file, dan menjalankan perintah (dengan konfirmasi pengguna).");
+/* ------------------------------------------------- SOUL.md (Hermes Agent) */
 
+const SOUL_FILE = path.join(CONFIG_DIR, "SOUL.md");
+let SOUL_TEKS = "";
+
+const SOUL_BAWAAN = `# SOUL — Kepribadian omnitermux
+
+Anda adalah asisten AI omnitermux yang membantu, ramah, dan ringkas.
+Anda berjalan di terminal Termux di perangkat Android pengguna.
+
+## Kepribadian
+- Ramah dan sopan, tapi langsung ke inti — tanpa basa-basi berlebihan.
+- Ringkas: jawab secukupnya; gunakan poin/bullet untuk langkah teknis.
+- Jujur: jika tidak tahu atau belum yakin, katakan terus; jangan mengarang.
+- Proaktif: tawarkan langkah berikutnya yang wajar tanpa bertele-tele.
+
+## Konteks teknis
+- Anda berjalan di terminal: format jawaban harus ramah-terminal (markdown ringan, tanpa HTML).
+- Gunakan Bahasa Indonesia untuk percakapan, kecuali user memilih bahasa lain.
+- Anda punya akses tool (baca/tulis/edit file, jalankan perintah) di dalam folder workspace — gunakan langsung saat relevan.
+`;
+
+// Baca SOUL.md setiap aplikasi dimuat; buat file bawaan jika belum ada
+async function muatSOUL() {
+  try {
+    await fs.mkdir(CONFIG_DIR, { recursive: true });
+    try {
+      await fs.access(SOUL_FILE);
+    } catch {
+      await fs.writeFile(SOUL_FILE, SOUL_BAWAAN, "utf-8");
+    }
+    SOUL_TEKS = await fs.readFile(SOUL_FILE, "utf-8");
+  } catch {
+    SOUL_TEKS = ""; // gagal baca → lanjut tanpa identitas khusus
+  }
+}
+
+/* --------------------------- perakit system message (urutan prioritas) */
+// 1. SOUL.md (identitas) → 2. Skill aktif → 3. Memori persisten → 4. Mode agen
+async function susunSystemPesan() {
+  const bagian = [];
+
+  // 1. Identitas & kepribadian — paling atas
+  const soul = (SOUL_TEKS || "").trim();
+  bagian.push(soul ||
+    "Anda adalah asisten AI omnitermux yang membantu, ramah, dan ringkas. Berjalan di terminal Termux.");
+
+  // 2. Instruksi skill aktif (jika ada)
+  if (activeSkill) {
+    bagian.push(
+      `=== SKILL AKTIF: ${activeSkill.nama} ===\n` +
+      `Ikuti instruksi skill berikut untuk semua permintaan selama skill ini aktif:\n` +
+      activeSkill.isi.trim()
+    );
+  }
+
+  // 3. Memori persisten (fakta yang diingat)
   const fakta = await muatMemori();
   if (fakta.length > 0) {
-    teks += "\n\nFakta penting tentang user/konteks (gunakan sebagai konteks, jangan diucapkan ulang kecuali diminta):\n" +
-      fakta.map((f) => `- ${f.teks}`).join("\n");
+    bagian.push(
+      "=== MEMORI PERSISTEN ===\n" +
+      "Fakta penting tentang user (gunakan sebagai konteks, jangan diucapkan ulang kecuali diminta):\n" +
+      fakta.map((f) => `- ${f.teks}`).join("\n")
+    );
   }
-  return teks;
+
+  // 4. Mode agen beserta whitelist — paling bawah
+  if (MODE_AKTIF === "plan") {
+    bagian.push(
+      "=== MODE AGEN: PLAN (read-only) ===\n" +
+      `Kamu HANYA boleh membaca (read_file) dan perintah shell dari whitelist berikut: ${PLAN_WHITELIST.join(", ")}.\n` +
+      "Dilarang menulis/mengedit file atau menjalankan perintah di luar whitelist — sistem akan memblokirnya.\n" +
+      "GUNAKAN TOOL LANGSUNG tanpa menanyakan izin via teks; konfirmasi ditangani sistem. Bahasa Indonesia."
+    );
+  } else {
+    bagian.push(
+      "=== MODE AGEN: BUILD ===\n" +
+      "Kamu boleh membaca, menulis, mengedit file, dan menjalankan perintah (tool: read_file, write_file, edit_file, run_command) dengan konfirmasi pengguna.\n" +
+      "GUNAKAN TOOL LANGSUNG tanpa menanyakan izin via teks; konfirmasi ditangani sistem. Bahasa Indonesia."
+    );
+  }
+
+  return bagian.join("\n\n");
 }
 
 /* -------------------------------------------- agent skills (Matt Pocock) */
@@ -1189,21 +1288,21 @@ async function aktifkanSkill(nama) {
   return activeSkill;
 }
 
-// Suntikkan skill aktif ke system message SAAT REQUEST dikirim.
-// Riwayat ASLI tidak disentuh — dibuat salinan setiap request agar
-// teks skill tidak menumpuk (akumulasi) pada percakapan berikutnya.
-function susunPesanDenganSkill(riwayat) {
-  if (!activeSkill) return riwayat;
+// Susun messages untuk request: system message SELALU disusun ulang dari
+// komponen terbaru (SOUL → skill → memori → mode) dan diletakkan paling atas.
+// Riwayat ASLI tidak disentuh — hanya salinan, agar tidak ada yang menumpuk.
+async function susunPesanKeAPI(riwayat) {
   const salinan = riwayat.map((m) => ({ ...m }));
-  const sistem = salinan.find((m) => m.role === "system");
-  if (sistem && typeof sistem.content === "string") {
-    sistem.content += `\n\n--- SKILL AKTIF: ${activeSkill.nama} ---\n${activeSkill.isi}\n--- AKHIR SKILL ---`;
-  }
+  const sistem = { role: "system", content: await susunSystemPesan() };
+  const indeksSistem = salinan.findIndex((m) => m.role === "system");
+  if (indeksSistem >= 0) salinan[indeksSistem] = sistem;
+  else salinan.unshift(sistem);
   return salinan;
 }
 
 async function main() {
-  // Siapkan folder & skill bawaan sebelum sesi dimulai
+  // Siapkan SOUL.md, folder & skill bawaan sebelum sesi dimulai
+  await muatSOUL();
   await siapkanSkills();
   // 1. Muat konfigurasi
   let config = await bacaConfig();
@@ -1242,12 +1341,7 @@ async function main() {
     output: stdout,
     terminal: stdout.isTTY,
   });
-  const riwayat = [
-    {
-      role: "system",
-      content: await bangunSistemPrompt(),
-    }
-  ];
+  const riwayat = []; // system message disusun ulang per request oleh susunPesanKeAPI()
   let keluar = false;
 
   cetakBanner(lebar);
@@ -1276,7 +1370,7 @@ async function main() {
     if (teks === "/model") { console.log(); await handleModelCommand(rl, lebar); tanya(); continue; }
     if (teks === "/config") { console.log(); await handleConfigCommand(rl, lebar); tanya(); continue; }
     if (teks === "/tools") { console.log(); handleToolsCommand(lebar); tanya(); continue; }
-    if (teks === "/mode" || teks.startsWith("/mode ")) { console.log(); await handleModeCommand(teks, riwayat); tanya(); continue; }
+    if (teks === "/mode" || teks.startsWith("/mode ")) { console.log(); await handleModeCommand(teks); tanya(); continue; }
     if (teks === "/remember" || teks.startsWith("/remember ")) {
       console.log();
       const fakta = teks.slice("/remember".length).trim();
@@ -1284,7 +1378,6 @@ async function main() {
         console.log(cat("  ℹ️  Gunakan: /remember <fakta> — contoh: /remember Saya suka kopi dingin", C.kuning));
       } else {
         await tambahFakta(fakta);
-        riwayat[0].content = await bangunSistemPrompt();
         const total = (await muatMemori()).length;
         console.log(cat(`  🧠 Tersimpan ke memori: ${fakta}`, C.hijau));
         console.log(cat(`     Total fakta: ${total} (lihat dengan /recall)`, C.abu));
@@ -1307,6 +1400,11 @@ async function main() {
         console.log(bingkaiBawah(lebar));
       }
       console.log(); tanya(); continue;
+    }
+    if (teks === "/soul" || teks.startsWith("/soul ")) {
+      console.log();
+      await handleSoulCommand(teks.split(/\s+/)[1] || "", lebar);
+      tanya(); continue;
     }
     if (teks === "/skills") { console.log(); await handleSkillsCommand(lebar); tanya(); continue; }
     if (teks === "/clear-skill") {
@@ -1336,7 +1434,6 @@ async function main() {
     if (teks === "/clear") { handleClearCommand(); tanya(); continue; }
     if (teks === "/reset") {
       riwayat.length = 0;
-      riwayat.push({ role: "system", content: await bangunSistemPrompt() }); // sistem prompt ikut dipulihkan
       SESI.tokenTotal = 0; SESI.pesanDikirim = 0; SESI.pesanDiterima = 0;
       console.log("  " + cat("Riwayat percakapan dikosongkan.", C.abu));
       console.log(); tanya(); continue;
@@ -1348,7 +1445,6 @@ async function main() {
       spinner.berhenti();
       if (ringkasan) {
         riwayat.length = 0;
-        riwayat.push({ role: "system", content: await bangunSistemPrompt() }); // sistem prompt ikut dipulihkan
         riwayat.push({ role: "user", content: "[Ringkasan percakapan sebelumnya]" });
         riwayat.push({ role: "assistant", content: ringkasan });
         console.log("  " + cat("Percakapan diringkas:", C.hijau));
@@ -1407,4 +1503,4 @@ if (require.main === module) {
   main().catch((err) => { console.error("Terjadi kesalahan tak terduga:", err); process.exitCode = 1; });
 }
 
-module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, perintahPlanDiizinkan, toolsUntukMode, bangunSistemPrompt, muatMemori, siapkanSkills, susunPesanDenganSkill, aktifkanSkill, SKILLS_DIR };
+module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, perintahPlanDiizinkan, toolsUntukMode, muatMemori, siapkanSkills, susunSystemPesan, susunPesanKeAPI, aktifkanSkill, muatSOUL, SKILLS_DIR, SOUL_FILE };

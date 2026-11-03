@@ -13,7 +13,7 @@
 
 ---
 
-Omnitermux is a universal AI assistant that runs entirely in your terminal. It connects to **any OpenAI-compatible API** — direct providers (NVIDIA, OpenRouter, Groq, Google AI, OpenAI) or local gateways (OmniRoute, 9Router, LiteLLM) — and gives the model real abilities through **AI Skills (Tool Calling)**: read, write, and *safely edit* files, and run shell commands, all inside a sandboxed `workspace/` folder. It also borrows the best ideas from famous agents: **agent modes** from OpenCode2, **persistent memory** from Hermes Agent, and **smart file editing** from Oh My Pi.
+Omnitermux is a universal AI assistant that runs entirely in your terminal. It connects to **any OpenAI-compatible API** — direct providers (NVIDIA, OpenRouter, Groq, Google AI, OpenAI) or local gateways (OmniRoute, 9Router, LiteLLM) — and gives the model real abilities through **AI Skills (Tool Calling)**: read, write, and *safely edit* files, and run shell commands, all inside a sandboxed `workspace/` folder. It also borrows the best ideas from famous agents: **agent modes** from OpenCode2, **persistent memory** and a **SOUL.md identity** from Hermes Agent, and **smart file editing** from Oh My Pi.
 
 Everything is written with **only Node.js built-in modules** — no `npm install`, no `node_modules`, no external dependencies.
 
@@ -26,11 +26,12 @@ Everything is written with **only Node.js built-in modules** — no `npm install
 - **🧭 Interactive Setup Wizard** — Guided first-run configuration with two connection modes: *Direct Provider* (API key straight to the vendor) or *Gateway / Proxy* (OmniRoute, 9Router, LiteLLM, ...).
 - **🎭 Agent Skills** — Adopted from Matt Pocock: loadable skill instructions (`/grill-me`, `/tdd`, `/code-review`) that are injected into the system prompt for every request, with `/skills` to list them and `/clear-skill` to turn them off. The active skill shows in the status bar as `[SKILL: nama]`.
 - **🧭 Agent Modes** — Adopted from OpenCode2: `/mode plan` restricts the AI to **read-only** work (`read_file` + whitelisted commands like `ls`, `cat`, `git status`), while `/mode build` unlocks full capabilities. The active mode is always shown in the status bar as `[PLAN]` / `[BUILD]`.
-- **🧠 Persistent Memory** — Adopted from Hermes Agent: `/remember <fact>` stores facts in `~/.config/omnitermux/memory.json`, `/recall` lists them, and every fact is automatically injected into the AI's system prompt at session start.
+- **🧠 Persistent Memory** — Adopted from Hermes Agent: `/remember <fact>` stores facts in `~/.config/omnitermux/memory.json`, `/recall` lists them, and every fact is automatically injected into the AI's system prompt.
+- **👤 SOUL Identity** — Adopted from Hermes Agent: `~/.config/omnitermux/SOUL.md` defines the AI's personality. View it with `/soul`, edit it with `/soul edit` (nano). On every request the system message is assembled in priority order: **SOUL → active skill → persistent memory → agent mode (with whitelist)**.
 - **✂️ Smart File Editing** — Adopted from Oh My Pi: the `edit_file` tool performs targeted string replacement instead of rewriting whole files — safer and far more token-efficient.
 - **🤖 AI Skills (Tool Calling)** — Standard OpenAI Function Calling schema with four tools: `read_file`, `write_file`, `edit_file`, `run_command` — plus a hardened sandbox and per-call user confirmation.
 - **📑 Model Pagination** — Model lists are paged 20 at a time with `next` / `all` navigation, active-model highlighting, and selection by number or name.
-- **⌨️ Slash Commands** — `/model`, `/config`, `/tools`, `/clear`, `/help`, `/stats`, `/compact`, `/reset` — full runtime control without restarting.
+- **⌨️ Slash Commands** — `/model`, `/config`, `/tools`, `/soul`, `/clear`, `/help`, `/stats`, `/compact`, `/reset` — full runtime control without restarting.
 - **🎨 Polished Terminal UI** — Box-drawing frames, ANSI colors (auto-disabled when piped or via `NO_COLOR`), animated spinner, live status bar with model, token count, cost, and session duration.
 - **🌐 Multi-Provider Support** — NVIDIA, OpenRouter, Groq, Google AI (Gemini), OpenAI, Anthropic, plus any OpenAI-compatible gateway.
 - **📊 Session Statistics** — Track messages sent/received, estimated tokens, estimated cost, and elapsed time with `/stats`.
@@ -164,6 +165,7 @@ Type these at the `USER >` prompt:
 | `/tdd` | Activate skill: follow strict Red-Green-Refactor cycles |
 | `/code-review` | Activate skill: review freshly written code before declaring done |
 | `/clear-skill` | Deactivate the currently active skill |
+| `/soul` | Display the AI identity/personality (`SOUL.md`); `/soul edit` opens it in nano |
 | `/clear` | Clear the terminal screen |
 | `/stats` | Show session statistics (tokens, cost, duration, messages) |
 | `/compact` | Ask the AI to summarize the conversation to save context |
@@ -267,6 +269,7 @@ omnitermux/
 ├── package.json      # Metadata (zero runtime dependencies)
 └── ~/.config/omnitermux/
     ├── config.json   # Your saved configuration
+    ├── SOUL.md       # AI identity & personality (view with /soul, edit with /soul edit)
     ├── memory.json   # Persistent memory (facts saved with /remember)
     └── skills/       # Agent skills (grill-me.md, tdd.md, code-review.md — editable)
 ```
