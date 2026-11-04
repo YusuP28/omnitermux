@@ -59,7 +59,7 @@ const VERSI = "0.5.0";
 
 // Warna hanya dipakai saat output benar-benar terminal. Saat output dipipa
 // (mis. ke file) semua kode ANSI dimatikan supaya teksnya bersih.
-const PAKAI_WARNA = Boolean(stdout.isTTY) && !process.env.NO_COLOR;
+const PAKAI_WARNA = (Boolean(stdout.isTTY) || Boolean(process.env.FORCE_COLOR)) && !process.env.NO_COLOR;
 const esc = (kode) => (PAKAI_WARNA ? `\x1b[${kode}m` : "");
 
 const C = {
@@ -169,6 +169,107 @@ function formatBaris(baris) {
     .replace(/`([^`]+)`/g, (_m, isi) => `${C.sian}${isi}${C.putih}`);
 }
 
+/* ------------------------------------- syntax highlighting (Fase 7, tanpa deps) */
+
+// Palet: kata kunci → sian, literal/fungsi → biru, string → hijau,
+// komentar → abu, angka → magenta. Konsisten dengan palet UI utama.
+const KATA_KUNCI_JS = new Set([
+  "const", "let", "var", "function", "return", "if", "else", "for", "while", "do",
+  "switch", "case", "break", "continue", "new", "class", "extends", "super", "this",
+  "typeof", "instanceof", "try", "catch", "finally", "throw", "await", "async",
+  "import", "export", "from", "require", "default", "delete", "void", "in", "of",
+  "yield", "static", "interface", "enum", "type", "as", "satisfies",
+]);
+const KATA_KUNCI_PY = new Set([
+  "def", "return", "if", "elif", "else", "for", "while", "in", "not", "and", "or",
+  "import", "from", "as", "class", "try", "except", "finally", "raise", "with",
+  "lambda", "yield", "pass", "break", "continue", "global", "nonlocal", "assert",
+  "del", "async", "await",
+]);
+const KATA_KUNCI_SH = new Set([
+  "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac",
+  "function", "return", "exit", "echo", "export", "local", "source", "read", "set",
+  "unset", "trap", "shift", "select", "until", "cd", "alias",
+]);
+const KATA_KUNCI_SQL = new Set([
+  "select", "from", "where", "insert", "into", "values", "update", "set", "delete",
+  "create", "table", "drop", "alter", "add", "column", "join", "inner", "left",
+  "right", "outer", "full", "on", "group", "by", "order", "having", "limit",
+  "offset", "union", "all", "distinct", "as", "and", "or", "not", "null", "is",
+  "like", "between", "exists", "primary", "key", "foreign", "references", "index",
+  "with", "case", "when", "then", "end", "asc", "desc",
+]);
+const LITERALS = new Set([
+  "true", "false", "null", "undefined", "nan", "infinity", "none", "nil", "self", "console",
+]);
+const KATA_KUNCI_UMUM = new Set([...KATA_KUNCI_JS, ...KATA_KUNCI_PY, ...KATA_KUNCI_SH, ...KATA_KUNCI_SQL]);
+const TANPA_KATA = new Set();
+
+// Aturan per bahasa: pola komentar (sticky) + daftar kata kunci (lowercase).
+function aturanBahasa(bahasa) {
+  const b = String(bahasa || "").toLowerCase();
+  const JS = ["js", "jsx", "mjs", "cjs", "javascript", "typescript", "ts", "tsx", "node", "vue", "svelte"];
+  const PY = ["py", "python", "python3"];
+  const SH = ["sh", "bash", "shell", "zsh", "console", "termux"];
+  const SQL = ["sql", "mysql", "postgres", "pgsql", "sqlite"];
+  if (JS.includes(b)) return { komentar: /\/\/[^\n]*|\/\*[\s\S]*?\*\//y, kata: KATA_KUNCI_JS };
+  if (PY.includes(b)) return { komentar: /#[^\n]*/y, kata: KATA_KUNCI_PY };
+  if (SH.includes(b)) return { komentar: /#[^\n]*/y, kata: KATA_KUNCI_SH };
+  if (SQL.includes(b)) return { komentar: /--[^\n]*|\/\*[\s\S]*?\*\//y, kata: KATA_KUNCI_SQL, hurufBesar: false };
+  if (b === "json") return { komentar: null, kata: LITERALS };
+  if (["html", "xml", "svg"].includes(b)) return { komentar: /<!--[\s\S]*?-->/y, kata: TANPA_KATA };
+  if (["css", "scss", "less"].includes(b)) return { komentar: /\/\*[\s\S]*?\*\//y, kata: TANPA_KATA };
+  if (["md", "markdown", "text", "txt"].includes(b)) return { komentar: null, kata: TANPA_KATA };
+  // bahasa tak dikenal → campuran aman
+  return { komentar: /\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\//y, kata: KATA_KUNCI_UMUM };
+}
+
+// Warnai satu baris/blok kode. Token diberi warna lalu dikembalikan ke putih
+// agar warna teks frame (putih) tetap hidup setelah token berwarna.
+function warnaiKode(kode, bahasa) {
+  if (!PAKAI_WARNA || !kode) return String(kode);
+  const aturan = aturanBahasa(bahasa);
+  const reKomentar = aturan.komentar || null;
+  const reString = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/y;
+  const reAngka = /(?:0[xX][\da-fA-F]+|\d[\d_]*(?:\.\d+)?)/y;
+  const reKata = /[A-Za-z_$][\w$]*/y;
+  const ke = (re, pos) => { re.lastIndex = pos; return re.exec(String(kode)); };
+  const s = String(kode);
+  let i = 0;
+  let hasil = "";
+  while (i < s.length) {
+    let m = null;
+    if (reKomentar && (m = ke(reKomentar, i))) {
+      hasil += C.abu + m[0] + C.putih; i += m[0].length; continue;
+    }
+    if ((m = ke(reString, i))) {
+      hasil += C.hijau + m[0] + C.putih; i += m[0].length; continue;
+    }
+    if ((m = ke(reAngka, i))) {
+      hasil += C.magenta + m[0] + C.putih; i += m[0].length; continue;
+    }
+    if ((m = ke(reKata, i))) {
+      const kata = m[0];
+      const rendah = kata.toLowerCase();
+      if (LITERALS.has(rendah)) {
+        hasil += C.biru + kata + C.putih;
+      } else if (aturan.kata.has(rendah)) {
+        hasil += C.sian + kata + C.putih;
+      } else {
+        // fungsi: identifier yang diikuti "(" → biru
+        let j = i + kata.length;
+        while (j < s.length && (s[j] === " " || s[j] === "\t")) j += 1;
+        hasil += s[j] === "(" ? C.biru + kata + C.putih : kata;
+      }
+      i += kata.length;
+      continue;
+    }
+    hasil += s[i];
+    i += 1;
+  }
+  return hasil;
+}
+
 function bersihkanTeks(teks) {
   return String(teks)
     .replace(/<br\s*\/?>/gi, "\n")
@@ -194,21 +295,81 @@ function apakahPemisah(baris) {
   return adaGaris && semuaGaris;
 }
 
+function bersihkanSel(teks) {
+  return String(teks || "").replace(/<br\s*\/?>/gi, " ").replace(/\s+/g, " ").trim();
+}
+
+// Lebar teks SETELAH marker markdown (** dan `) dirender — dipakai untuk
+// mengukur kolom agar garis tabel tidak melar/pecah.
+function lebarPantulan(teks) {
+  return lebarTeks(String(teks).replace(/\*\*/g, "").replace(/`/g, ""));
+}
+
+// Potong teks berisi ANSI escape dengan aman: escape sequence dihitung lebar 0.
+function potongANSI(teks, batas) {
+  const s = String(teks);
+  let hasil = "";
+  let dipakai = 0;
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\x1b") {
+      const m = s.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (m) { hasil += m[0]; i += m[0].length; continue; }
+    }
+    const w = lebarTeks(s[i]);
+    if (dipakai + w > batas) break;
+    hasil += s[i];
+    dipakai += w;
+    i += 1;
+  }
+  return hasil;
+}
+
+// Ratakan teks ke lebar kolom (kiri/tengah/kanan) berdasarkan baris pemisah.
+function sejajar(teks, lebar, alini) {
+  const sisa = lebar - lebarTeks(teks);
+  if (sisa <= 0) return teks;
+  if (alini === "kanan") return " ".repeat(sisa) + teks;
+  if (alini === "tengah") {
+    const kiri = Math.floor(sisa / 2);
+    return " ".repeat(kiri) + teks + " ".repeat(sisa - kiri);
+  }
+  return teks + " ".repeat(sisa);
+}
+
 function tabelVertikal(sel, pemisah, lebar) {
   const barisData = sel.filter((_, i) => !pemisah[i]);
   const judul = barisData[0] || [];
   const isi = barisData.slice(1);
   const hasil = [];
-  isi.forEach((baris, indeks) => {
+  const lebarKotak = Math.max(24, lebar);
+  const dalam = Math.max(16, lebarKotak - 4);
+  const labelMaks = Math.min(
+    Math.max(4, ...judul.map((h) => lebarPantulan(h))),
+    Math.max(4, dalam - 8)
+  );
+  isi.forEach((baris, idx) => {
+    if (idx > 0) hasil.push(""); // jarak antar baris data
+    const topik = ` data ${idx + 1} `;
+    hasil.push(cat("╭" + topik + "─".repeat(Math.max(0, lebarKotak - 2 - topik.length)) + "╮", C.abu));
     baris.forEach((nilai, j) => {
       if (nilai === "") return;
       const label = judul[j] || `Kolom ${j + 1}`;
-      const teks = formatBaris(`${label}: ${nilai}`);
-      for (const potong of bungkus(teks, Math.max(20, lebar - 2))) {
-        hasil.push("  " + potong);
-      }
+      const polos = `${pad(label, labelMaks)}: ${nilai}`;
+      const potongan = bungkus(polos, dalam);
+      potongan.forEach((p, k) => {
+        let tampil;
+        if (k === 0) {
+          const m = p.match(/^([^:]+)(:[\s\S]*)$/);
+          tampil = m ? cat(m[1] + ":", C.sian, C.tebal) + cat(m[2].slice(1), C.putih) : cat(p, C.putih);
+        } else {
+          tampil = cat(p, C.putih);
+        }
+        const sisa = Math.max(0, dalam - lebarTeks(p));
+        hasil.push(cat("│ ", C.abu) + tampil + " ".repeat(sisa) + cat(" │", C.abu));
+      });
     });
-    if (indeks < isi.length - 1) hasil.push("");
+    hasil.push(cat("╰" + "─".repeat(lebarKotak - 2) + "╯", C.abu));
   });
   return hasil;
 }
@@ -230,9 +391,21 @@ function formatTabel(blok, lebar) {
   const jumlahKolom = Math.max(1, ...sel.map((r) => r.length));
   for (const baris of sel) {
     while (baris.length < jumlahKolom) baris.push("");
+    for (let j = 0; j < baris.length; j += 1) baris[j] = bersihkanSel(baris[j]);
   }
+
+  // Perataan kolom dari baris pemisah (:--- kiri, ---: kanan, :-: tengah)
+  const indeksPemisah = sel.findIndex((_, i) => pemisah[i]);
+  const alini = Array.from({ length: jumlahKolom }, (_, j) => {
+    const s = indeksPemisah >= 0 ? (sel[indeksPemisah][j] || "") : "";
+    if (s.startsWith(":") && s.endsWith(":")) return "tengah";
+    if (s.endsWith(":")) return "kanan";
+    return "kiri";
+  });
+
+  // Ukur kolom pada teks TANPA marker markdown agar garis tetap lurus
   const lebarAlami = Array.from({ length: jumlahKolom }, (_, j) =>
-    Math.max(3, ...barisData.map((r) => lebarTeks(r[j] || "")))
+    Math.max(3, ...barisData.map((r) => lebarPantulan(r[j] || "")))
   );
   const lebarKolom = [...lebarAlami];
   const tersedia = lebar - (3 * jumlahKolom + 1);
@@ -245,25 +418,41 @@ function formatTabel(blok, lebar) {
     total -= 1;
     iterasi += 1;
   }
+  // Terlalu lebar untuk layar → ubah otomatis jadi format vertikal (Label: Nilai)
   if (total > tersedia && barisData.length > 1) {
     return tabelVertikal(sel, pemisah, lebar);
   }
-  const garis = "|" + lebarKolom.map((w) => "-".repeat(w + 2)).join("|") + "|";
+  const garis = "│" + lebarKolom.map((w) => "─".repeat(w + 2)).join("│") + "│";
   const hasil = [];
   sel.forEach((barisSel, i) => {
-    if (pemisah[i]) { hasil.push(garis); return; }
+    if (pemisah[i]) { hasil.push(cat(garis, C.abu)); return; }
     const terbungkus = lebarKolom.map((w, j) => bungkus(barisSel[j] || "", w));
     const tinggi = Math.max(1, ...terbungkus.map((k) => k.length));
     for (let k = 0; k < tinggi; k += 1) {
       const isi = terbungkus
         .map((kumpulan, j) => {
-          const teks = formatBaris(kumpulan[k] || "");
-          return pad(potongElipsis(teks, lebarKolom[j]), lebarKolom[j]);
+          // render dulu → potong (aman ANSI) → ratakan → lebar kolom tepat
+          const dirender = formatBaris(kumpulan[k] || "");
+          return sejajar(potongANSI(dirender, lebarKolom[j]), lebarKolom[j], alini[j]);
         })
-        .join(" | ");
-      hasil.push("| " + isi + " |");
+        .join(" │ ");
+      hasil.push(cat("│ ", C.abu) + isi + cat(" │", C.abu));
     }
   });
+  return hasil;
+}
+
+// Render blok kode: label bahasa + tiap baris diberi indent & syntax highlighting.
+function renderBlokKode(blok, bahasa, lebar) {
+  const hasil = [];
+  hasil.push(cat(`  ─ ${bahasa || "kode"}`, C.sian, C.tebal));
+  const dalam = Math.max(8, lebar - 2); // sisakan 2 spasi indent
+  for (const barisAsli of (blok.length > 0 ? blok : [""])) {
+    for (const p of bungkus(barisAsli, dalam)) {
+      hasil.push(p === "" ? "" : "  " + warnaiKode(p, bahasa));
+    }
+  }
+  hasil.push(""); // jarak setelah blok kode
   return hasil;
 }
 
@@ -274,30 +463,60 @@ function siapkanIsi(teks, lebar) {
     .split("\n")
     .map((baris) => baris.replace(/\s+$/, ""));
   const hasil = [];
-  for (let i = 0; i < barisMentah.length; i += 1) {
-    if (apakahTabel(barisMentah[i])) {
+  let i = 0;
+  while (i < barisMentah.length) {
+    const baris = barisMentah[i];
+
+    // Blok kode berpagar ``` — warnai sintaksnya
+    const pagar = baris.match(/^\s*```(.*)$/);
+    if (pagar) {
+      const info = pagar[1].trim();
+      const bahasa = info ? info.split(/\s+/)[0].toLowerCase() : "";
+      const kode = [];
+      i += 1;
+      while (i < barisMentah.length && !/^\s*```/.test(barisMentah[i])) {
+        kode.push(barisMentah[i]);
+        i += 1;
+      }
+      i += 1; // lewati pagar penutup (atau habis jika tidak ditutup)
+      hasil.push(...renderBlokKode(kode, bahasa, lebar));
+      continue;
+    }
+
+    if (apakahTabel(baris)) {
       const blok = [];
       while (i < barisMentah.length && apakahTabel(barisMentah[i])) {
         blok.push(barisMentah[i]);
         i += 1;
       }
-      i -= 1;
       hasil.push(...formatTabel(blok, lebar));
       continue;
     }
-    hasil.push(...bungkus(barisMentah[i], lebar));
+
+    hasil.push(...bungkus(baris, lebar).map((b) => formatBaris(b)));
+    i += 1;
   }
   return hasil;
 }
 
-function bingkaiAtas(judul, lebar) {
+function bingkaiAtas(judul, lebar, warna = C.abu) {
   const label = `─ ${judul} `;
-  const sisa = Math.max(0, lebar - label.length - 2);
-  return cat("┌" + label + "─".repeat(sisa) + "┐", C.abu);
+  const sisa = Math.max(0, lebar - lebarTeks(label) - 2);
+  return cat("╭" + label + "─".repeat(sisa) + "╮", warna, C.tebal);
 }
 
-function bingkaiBawah(lebar) {
-  return cat("└" + "─".repeat(Math.max(0, lebar - 2)) + "┘", C.abu);
+function bingkaiBawah(lebar, warna = C.abu) {
+  return cat("╰" + "─".repeat(Math.max(0, lebar - 2)) + "╯", warna, C.tebal);
+}
+
+// Cetak baris siap-tampil (dari siapkanIsi) di dalam bingkai │ ... │
+// dengan padding kanan rapi. Warna teks dasar = putih.
+function cetakIsiBingkai(baris, lebarIsi, warna = C.abu) {
+  for (const b of baris) {
+    if (b === "") { console.log(cat("│", warna)); continue; }
+    const sisa = Math.max(1, lebarIsi - lebarTeks(b));
+    console.log(cat("│ ", warna) + C.putih + b + C.reset + " ".repeat(sisa) + cat("│", warna));
+  }
 }
 
 /* --------------------------------------------------------------- spinner */
@@ -348,24 +567,50 @@ function hitungBiayaPerkiraan(token) {
   return "$0.00";
 }
 
+// Format token ringkas: 999 → "999", 1200 → "1.2k", 1500000 → "1.5M"
+function formatTokenSingkat(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(n);
+}
+
+// Status bar premium: [BUILD] │ model │ 1.2k tokens │ $0.00 │ 2m 15s
 function cetakStatusBar(lebar) {
-  const sekarang = Date.now();
-  const durasi = formatDurasi(sekarang - SESI.mulai);
-  const model = SESI.modelAktif;
-  const token = SESI.tokenTotal;
-  const biaya = hitungBiayaPerkiraan(token);
+  const durasi = formatDurasi(Date.now() - SESI.mulai);
+  const pisah = cat(" │ ", C.abu);
   const tagMode = MODE_AKTIF === "plan"
     ? cat("[PLAN]", C.kuning, C.tebal)
     : cat("[BUILD]", C.hijau, C.tebal);
   const tagSkill = activeSkill
-    ? " " + cat(`[SKILL: ${activeSkill.nama}]`, C.magenta, C.tebal)
+    ? cat(`[SKILL: ${activeSkill.nama}]`, C.magenta, C.tebal)
     : "";
-  const kiri = `${cat("●", C.hijau)} ${tagMode}${tagSkill} ${cat(model, C.putih, C.tebal)}`;
-  const tengah = `${cat("tokens:", C.abu)} ${cat(token.toLocaleString(), C.kuning)}`;
-  const kanan = `${cat("biaya:", C.abu)} ${cat(biaya, C.hijau)} · ${cat("durasi:", C.abu)} ${cat(durasi, C.putih)}`;
-  const isi = `${kiri} ${cat("·", C.abu)} ${tengah} ${cat("·", C.abu)} ${kanan}`;
-  const garis = "─".repeat(Math.max(0, lebar - lebarTeks(isi) - 2));
-  console.log(cat("┌", C.abu) + isi + " " + garis + cat("┐", C.abu));
+  const ekor = [
+    cat(`${formatTokenSingkat(SESI.tokenTotal)} tokens`, C.kuning),
+    cat(hitungBiayaPerkiraan(SESI.tokenTotal), C.hijau),
+    cat(durasi, C.putih),
+  ];
+
+  // Susun bagian; model diberi sisa ruang (dipotong jika kepanjangan).
+  const susun = (kepalaMentah) => {
+    const kepala = kepalaMentah.filter(Boolean);
+    const lebarTetap =
+      kepala.reduce((a, b) => a + lebarTeks(b), 0) +
+      ekor.reduce((a, b) => a + lebarTeks(b), 0) +
+      lebarTeks(pisah) * (kepala.length + ekor.length);
+    const anggaran = Math.max(8, lebar - 2 - lebarTetap);
+    const model = potongElipsis(SESI.modelAktif, anggaran);
+    return [...kepala, cat(model, C.putih, C.tebal), ...ekor];
+  };
+
+  let bagian = susun([tagMode, tagSkill]);
+  let isi = bagian.join(pisah);
+  // Layar sempit + skill aktif → lepas tag skill dulu agar tidak meluber
+  if (lebarTeks(isi) > lebar - 2) {
+    bagian = susun([tagMode, ""]);
+    isi = bagian.join(pisah);
+  }
+  const sisa = Math.max(0, lebar - 2 - lebarTeks(isi));
+  console.log(cat("╭", C.abu) + isi + cat("─".repeat(sisa), C.abu) + cat("╮", C.abu));
 }
 
 /* ------------------------------------------------------------ UI: tool */
@@ -728,7 +973,7 @@ async function handleConfigCommand(rl, lebar) {
   }
 
   console.log();
-  console.log(cat("┌─ Konfigurasi Saat Ini " + "─".repeat(Math.max(0, lebar - 23)) + "┐", C.abu));
+  console.log(cat("╭─ Konfigurasi Saat Ini " + "─".repeat(Math.max(0, lebar - 23)) + "╮", C.abu));
   
   const providerInfo = config.tipe === "direct" && DIRECT_PROVIDERS[config.provider] 
     ? DIRECT_PROVIDERS[config.provider].nama 
@@ -748,7 +993,7 @@ async function handleConfigCommand(rl, lebar) {
   rows.forEach(([label, value]) => {
     console.log(cat("│ ", C.abu) + cat(label.padEnd(12), C.abu) + cat("│ ", C.abu) + cat(value, C.putih) + " ".repeat(Math.max(1, lebar - 16 - lebarTeks(label) - lebarTeks(value))) + cat("│", C.abu));
   });
-  console.log(cat("└" + "─".repeat(Math.max(0, lebar - 2)) + "┘", C.abu));
+  console.log(cat("╰" + "─".repeat(Math.max(0, lebar - 2)) + "╯", C.abu));
   console.log();
 
   const action = await tanyaRL(rl, `Ketik 'edit' untuk mengubah konfigurasi (menjalankan setup ulang), atau tekan Enter untuk kembali: `, "");
@@ -834,7 +1079,7 @@ async function handleSkillsCommand(lebar) {
     return;
   }
 
-  console.log(bingkaiAtas("Agent Skills", lebar));
+  console.log(bingkaiAtas("Agent Skills", lebar, C.magenta));
   for (const nama of daftar) {
     let judul = "";
     try {
@@ -855,7 +1100,7 @@ async function handleSkillsCommand(lebar) {
       cat("│", C.abu)
     );
   }
-  console.log(bingkaiBawah(lebar));
+  console.log(bingkaiBawah(lebar, C.magenta));
   console.log(cat(`  Aktifkan: ${SKILL_TERSEDIA.map((s) => "/" + s).join(", ")} · /clear-skill untuk mematikan`, C.abu));
 }
 
@@ -882,17 +1127,9 @@ async function handleSoulCommand(arg, lebar) {
   let isi = "";
   try { isi = await fs.readFile(SOUL_FILE, "utf-8"); } catch { isi = SOUL_TEKS; }
   console.log();
-  console.log(bingkaiAtas("SOUL — Identitas & Kepribadian", lebar));
-  for (const baris of siapkanIsi(isi.trim() || "(file kosong)", Math.max(20, lebar - 4))) {
-    if (baris === "") console.log(cat("│", C.abu));
-    else {
-      console.log(
-        cat("│ ", C.abu) + cat(baris, C.putih) +
-        " ".repeat(Math.max(1, lebar - 3 - lebarTeks(baris))) + cat("│", C.abu)
-      );
-    }
-  }
-  console.log(bingkaiBawah(lebar));
+  console.log(bingkaiAtas("SOUL — Identitas & Kepribadian", lebar, C.magenta));
+  cetakIsiBingkai(siapkanIsi(isi.trim() || "(file kosong)", Math.max(20, lebar - 4)), lebar - 3, C.magenta);
+  console.log(bingkaiBawah(lebar, C.magenta));
   console.log(cat(`  Ubah dengan /soul edit (nano) · file: ${SOUL_FILE}`, C.abu));
 }
 
@@ -940,7 +1177,7 @@ async function handleHelpCommand(lebar) {
     });
     console.log(cat("├" + "─".repeat(Math.max(0, lebar - 2)) + "┤", C.abu));
   }
-  console.log(cat("└" + "─".repeat(Math.max(0, lebar - 2)) + "┘", C.abu));
+  console.log(cat("╰" + "─".repeat(Math.max(0, lebar - 2)) + "╯", C.abu));
   console.log();
 }
 
@@ -1044,13 +1281,32 @@ async function mintaRingkasan(riwayat) {
 
 function cetakBalasan(hasil, lebar) {
   const dalam = Math.max(24, lebar - 4);
-  console.log(bingkaiAtas(`AI · ${hasil.model}`, lebar));
   const isi = hasil.teks.trim() === "" ? "(balasan kosong)" : hasil.teks;
-  for (const baris of siapkanIsi(isi, dalam)) {
-    if (baris === "") console.log(cat("│", C.abu));
-    else console.log(cat("│ ", C.abu) + cat(formatBaris(baris), C.putih));
-  }
-  console.log(bingkaiBawah(lebar));
+  console.log(); // jarak kosong di atas balasan AI
+  console.log(bingkaiAtas(`AI · ${hasil.model}`, lebar, C.abu));
+  cetakIsiBingkai(siapkanIsi(isi, dalam), lebar - 3, C.abu);
+  console.log(bingkaiBawah(lebar, C.abu));
+  console.log(); // jarak kosong di bawah balasan AI
+}
+
+// Hapus baris echo readline agar pesan user hanya tampil di dalam bingkai.
+function hapusEchoUser(teks) {
+  if (!stdout.isTTY) return;
+  const kolom = stdout.columns || Number(process.env.COLUMNS) || 80;
+  const lebarEcho = 9 + lebarTeks(teks); // "  USER > "
+  const jumlahBaris = Math.max(1, Math.ceil(lebarEcho / kolom));
+  let keluaran = "\r\x1b[2K";
+  for (let i = 0; i < jumlahBaris; i += 1) keluaran += "\x1b[1A\r\x1b[2K";
+  try { stdout.write(keluaran); } catch { /* terminal aneh → biarkan echo tampil */ }
+}
+
+// Pesan user dalam bingkai sendiri (sudut membulat, aksen sian = "info").
+function cetakPesanUser(teks, lebar) {
+  const dalam = Math.max(24, lebar - 4);
+  console.log(); // jarak kosong di atas pesan user
+  console.log(bingkaiAtas("USER", lebar, C.sian));
+  cetakIsiBingkai(siapkanIsi(teks, dalam), lebar - 3, C.sian);
+  console.log(bingkaiBawah(lebar, C.sian));
   console.log();
 }
 
@@ -1390,14 +1646,14 @@ async function main() {
       if (fakta.length === 0) {
         console.log(cat("  🧠 Belum ada fakta tersimpan. Tambah dengan: /remember <fakta>", C.kuning));
       } else {
-        console.log(bingkaiAtas(`Memori (${fakta.length} fakta)`, lebar));
+        console.log(bingkaiAtas(`Memori (${fakta.length} fakta)`, lebar, C.sian));
         fakta.forEach((f, i) => {
           const baris = `${i + 1}. ${f.teks}`;
           for (const b of bungkus(baris, Math.max(20, lebar - 3))) {
             console.log(cat("│ ", C.abu) + cat(b, C.putih) + " ".repeat(Math.max(1, lebar - 3 - lebarTeks(b))) + cat("│", C.abu));
           }
         });
-        console.log(bingkaiBawah(lebar));
+        console.log(bingkaiBawah(lebar, C.sian));
       }
       console.log(); tanya(); continue;
     }
@@ -1456,6 +1712,8 @@ async function main() {
     }
 
     // Pesan user biasa
+    hapusEchoUser(teks);
+    cetakPesanUser(teks, lebar);
     riwayat.push({ role: "user", content: teks });
     potongRiwayat(riwayat);
     SESI.pesanDikirim += 1;
@@ -1503,4 +1761,4 @@ if (require.main === module) {
   main().catch((err) => { console.error("Terjadi kesalahan tak terduga:", err); process.exitCode = 1; });
 }
 
-module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, perintahPlanDiizinkan, toolsUntukMode, muatMemori, siapkanSkills, susunSystemPesan, susunPesanKeAPI, aktifkanSkill, muatSOUL, SKILLS_DIR, SOUL_FILE };
+module.exports = { kirimPesanDenganTool, pesanHTTP, pesanJaringan, bungkus, lebarTampilan, lebarTeks, siapkanIsi, formatTabel, warnaiKode, formatTokenSingkat, perintahPlanDiizinkan, toolsUntukMode, muatMemori, siapkanSkills, susunSystemPesan, susunPesanKeAPI, aktifkanSkill, muatSOUL, SKILLS_DIR, SOUL_FILE };
